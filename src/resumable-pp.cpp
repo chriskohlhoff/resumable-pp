@@ -25,12 +25,20 @@ public:
 
   bool VisitLambdaExpr(LambdaExpr* expr)
   {
+    if (!expr->isMutable())
+      return true;
+
     std::stringstream before;
     before << "/*BEGIN RESUMABLE LAMBDA DEFINITION*/\n\n";
     before << "[&]{\n";
     before << "  struct __resumable_lambda_" << counter_ << "\n";
     before << "  {\n";
+    before << "    int __state;\n";
     EmitCaptureMembers(before, expr);
+    before << "\n";
+    EmitConstructor(before, expr);
+    before << "\n";
+    EmitCallOperator(before, expr);
     before << "  };\n";
     before << "  return ";
     rewriter_.InsertTextBefore(expr->getLocStart(), before.str());
@@ -64,6 +72,58 @@ private:
         os << " __captured_" << name << ";\n";
       }
     }
+  }
+
+  void EmitConstructor(std::ostream& os, LambdaExpr* expr)
+  {
+    os << "    explicit __resumable_lambda_" << counter_ << "(\n";
+    os << "      int /*dummy*/";
+    for (LambdaExpr::capture_iterator c = expr->capture_begin(), e = expr->capture_end(); c != e; ++c)
+    {
+      os << ",\n";
+      if (c->getCaptureKind() == LCK_This)
+      {
+        os << "      decltype(this) __capture_arg_this";
+      }
+      else
+      {
+        std::string name = c->getCapturedVar()->getDeclName().getAsString();
+        os << "      decltype(" << name << ")& __capture_arg_" << name;
+      }
+    }
+    os << ")\n";
+    os << "    : __state(0)";
+    for (LambdaExpr::capture_iterator c = expr->capture_begin(), e = expr->capture_end(); c != e; ++c)
+    {
+      os << ",\n";
+      if (c->getCaptureKind() == LCK_This)
+      {
+        os << "      __captured_this(__capture_arg_this)";
+      }
+      else
+      {
+        std::string name = c->getCapturedVar()->getDeclName().getAsString();
+        os << "      __captured_" << name << "(__capture_arg_" << name << ")";
+      }
+    }
+    os << "\n";
+    os << "    {\n";
+    os << "    }\n";
+  }
+
+  void EmitCallOperator(std::ostream& os, LambdaExpr* expr)
+  {
+    CXXMethodDecl* method = expr->getCallOperator();
+    os << "    " << method->getReturnType().getAsString() << " operator()(";
+    for (FunctionDecl::param_iterator p = method->param_begin(), e = method->param_end(); p != e; ++p)
+    {
+      if (p != method->param_begin())
+        os << ",";
+      os << "\n      " << (*p)->getType().getAsString() << " " << (*p)->getNameAsString();
+    }
+    os << ")\n";
+    os << "    {\n";
+    os << "    }\n";
   }
 
   Rewriter& rewriter_;
