@@ -1,4 +1,5 @@
 #include <sstream>
+#include <stack>
 #include <string>
 #include "clang/AST/AST.h"
 #include "clang/AST/ASTConsumer.h"
@@ -28,9 +29,16 @@ public:
     if (!expr->isMutable())
       return true;
 
+    lambdas_.push(expr);
+
+    CompoundStmt* body = expr->getBody();
+    SourceRange beforeBody(expr->getLocStart(), body->getLocStart());
+    SourceRange afterBody(body->getLocEnd(), expr->getLocEnd());
+
     std::stringstream before;
     before << "/*BEGIN RESUMABLE LAMBDA DEFINITION*/\n\n";
     before << "[&]{\n";
+    EmitThisTypedef(before, expr);
     before << "  struct __resumable_lambda_" << counter_ << "\n";
     before << "  {\n";
     before << "    int __state;\n";
@@ -38,30 +46,93 @@ public:
     before << "\n";
     EmitConstructor(before, expr);
     before << "\n";
-    EmitCallOperator(before, expr);
-    before << "  };\n";
-    before << "  return ";
-    rewriter_.InsertTextBefore(expr->getLocStart(), before.str());
+    EmitCallOperatorDecl(before, expr);
+    before << "    {\n";
+    rewriter_.ReplaceText(beforeBody, before.str());
+
+    TraverseCompoundStmt(body);
 
     std::stringstream after;
-    after << ";\n";
+    after << "\n";
+    after << "    }\n";
+    after << "  };\n";
+    EmitReturn(after, expr);
     after << "}()\n\n";
     after << "/*END RESUMABLE LAMBDA DEFINITION*/";
-    rewriter_.InsertTextAfter(expr->getLocEnd().getLocWithOffset(1), after.str());
+    rewriter_.ReplaceText(afterBody, after.str());
 
+    lambdas_.pop();
     ++counter_;
 
     return true;
   }
 
+  bool VisitDeclRefExpr(DeclRefExpr* expr)
+  {
+    if (!lambdas_.empty())
+    {
+      LambdaExpr* lambda = lambdas_.top();
+      for (LambdaExpr::capture_iterator c = lambda->capture_begin(), e = lambda->capture_end(); c != e; ++c)
+      {
+        if (c->getCaptureKind() != LCK_This)
+        {
+          if (c->getCapturedVar() == expr->getDecl())
+          {
+            SourceRange range(expr->getLocStart(), expr->getLocEnd());
+            rewriter_.ReplaceText(range, "__captured_" + c->getCapturedVar()->getDeclName().getAsString());
+          }
+        }
+      }
+    }
+
+    return true;
+  }
+
+  bool VisitCXXThisExpr(CXXThisExpr* expr)
+  {
+    if (!lambdas_.empty())
+    {
+      LambdaExpr* lambda = lambdas_.top();
+      for (LambdaExpr::capture_iterator c = lambda->capture_begin(), e = lambda->capture_end(); c != e; ++c)
+      {
+        if (c->getCaptureKind() == LCK_This)
+        {
+          if (expr->isImplicit())
+          {
+            rewriter_.InsertTextBefore(expr->getLocStart(), "__captured_this->");
+          }
+          else
+          {
+            SourceRange range(expr->getLocStart(), expr->getLocEnd());
+            rewriter_.ReplaceText(range, "__captured_this");
+          }
+        }
+      }
+    }
+
+    return true;
+  }
+
 private:
+  void EmitThisTypedef(std::ostream& os, LambdaExpr* expr)
+  {
+    for (LambdaExpr::capture_iterator c = expr->capture_begin(), e = expr->capture_end(); c != e; ++c)
+    {
+      if (c->getCaptureKind() == LCK_This)
+      {
+        os << "  typedef decltype(this) __this_type;\n\n";
+        return;
+      }
+    }
+  }
+
   void EmitCaptureMembers(std::ostream& os, LambdaExpr* expr)
   {
     for (LambdaExpr::capture_iterator c = expr->capture_begin(), e = expr->capture_end(); c != e; ++c)
     {
       if (c->getCaptureKind() == LCK_This)
       {
-        os << "    decltype(this) __captured_this;\n";
+        os << "    __this_type __captured_this;\n";
       }
       else
       {
@@ -83,7 +154,7 @@ private:
       os << ",\n";
       if (c->getCaptureKind() == LCK_This)
       {
-        os << "      decltype(this) __capture_arg_this";
+        os << "      __this_type __capture_arg_this";
       }
       else
       {
@@ -111,7 +182,7 @@ private:
     os << "    }\n";
   }
 
-  void EmitCallOperator(std::ostream& os, LambdaExpr* expr)
+  void EmitCallOperatorDecl(std::ostream& os, LambdaExpr* expr)
   {
     CXXMethodDecl* method = expr->getCallOperator();
     os << "    " << method->getReturnType().getAsString() << " operator()(";
@@ -122,12 +193,27 @@ private:
       os << "\n      " << (*p)->getType().getAsString() << " " << (*p)->getNameAsString();
     }
     os << ")\n";
-    os << "    {\n";
-    os << "    }\n";
+  }
+
+  void EmitReturn(std::ostream& os, LambdaExpr* expr)
+  {
+    os << "  return __resumable_lambda_" << counter_ << "(\n";
+    os << "    0 /*dummy*/";
+    for (LambdaExpr::capture_iterator c = expr->capture_begin(), e = expr->capture_end(); c != e; ++c)
+    {
+      os << ",\n";
+      if (c->getCaptureKind() == LCK_This)
+        os << "    this";
+      else
+        os << "    " << c->getCapturedVar()->getDeclName().getAsString();
+    }
+    os << "\n";
+    os << "  );\n";
   }
 
   Rewriter& rewriter_;
   int counter_ = 0;
+  std::stack<LambdaExpr*> lambdas_;
 };
 
 class consumer : public ASTConsumer

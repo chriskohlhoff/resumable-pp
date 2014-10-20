@@ -10,10 +10,10 @@ class foo
 public:
   void bar()
   {
-    run([=]() mutable { baz(); });
+    run([=]() mutable { baz(this); });
   }
 
-  void baz()
+  void baz(foo*)
   {
   }
 };
