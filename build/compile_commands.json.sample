@@ -1,5 +1,0 @@
-[
-  { "directory": "/path/to/resumable-pp/test",
-    "command": "clang++ -std=c++1y -Dresumable=\"__attribute__((__annotate__(\\\"resumable\\\")))\" -Dyield=\"0?throw 99999999:throw\" -c -o test.o -c test.cpp",
-    "file": "test.cpp" }
-]

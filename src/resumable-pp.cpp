@@ -1,3 +1,4 @@
+#include <iostream>
 #include <sstream>
 #include <stack>
 #include <string>
@@ -313,8 +314,23 @@ private:
 
 int main(int argc, const char* argv[])
 {
-  static llvm::cl::OptionCategory category("Resumable Lambda Preprocessor");
-  CommonOptionsParser opts(argc, argv, category);
-  ClangTool tool(opts.getCompilations(), opts.getSourcePathList());
+  if (argc < 2)
+  {
+    std::cerr << "Usage: resumable-pp <source> [clang args]\n";
+    return 1;
+  }
+
+  std::vector<std::string> args;
+  args.push_back("-std=c++1y");
+  args.push_back("-Dresumable=__attribute__((__annotate__(\"resumable\")))");
+  args.push_back("-Dyield=0?throw 99999999:throw");
+  for (int arg = 2; arg < argc; ++arg)
+    args.push_back(argv[arg]);
+
+  std::vector<std::string> files;
+  files.push_back(argv[1]);
+
+  FixedCompilationDatabase cdb(".", args);
+  ClangTool tool(cdb, files);
   return tool.run(newFrontendActionFactory<action>().get());
 }
