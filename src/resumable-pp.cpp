@@ -72,6 +72,7 @@ public:
     before << "      switch (__state)\n";
     before << "      case 0:\n";
     before << "      {\n";
+    EmitLineNumber(before, body->getLocStart());
     rewriter_.ReplaceText(beforeBody, before.str());
 
     TraverseCompoundStmt(body);
@@ -84,6 +85,7 @@ public:
     after << "  };\n";
     EmitReturn(after, lambda_id, expr);
     after << "}()\n\n";
+    EmitLineNumber(after, body->getLocEnd());
     after << "/*END RESUMABLE LAMBDA DEFINITION*/";
     rewriter_.ReplaceText(afterBody, after.str());
 
@@ -289,6 +291,14 @@ private:
     os << "  );\n";
   }
 
+  void EmitLineNumber(std::ostream& os, SourceLocation location)
+  {
+    os << "#line ";
+    os << rewriter_.getSourceMgr().getExpansionLineNumber(location);
+    os << " \"" << rewriter_.getSourceMgr().getFilename(location).data() << "\"";
+    os << "\n";
+  }
+
   Rewriter& rewriter_;
   int next_lambda_id_ = 0;
   std::stack<lambda> lambdas_;
@@ -332,6 +342,8 @@ public:
   {
     llvm::errs() << "** Creating AST consumer for: " << file << "\n";
     rewriter_.setSourceMgr(compiler.getSourceManager(), compiler.getLangOpts());
+    std::string line = std::string("#line 1 \"") + file.data() + "\"\n";
+    rewriter_.InsertText(rewriter_.getSourceMgr().getLocForStartOfFile(rewriter_.getSourceMgr().getMainFileID()), line);
     return new consumer(rewriter_);
   }
 
