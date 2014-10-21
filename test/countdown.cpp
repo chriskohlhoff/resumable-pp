@@ -1,9 +1,9 @@
 #include <stdio.h>
+#include <utility>
 
 int main()
 {
-  int n = 10;
-  auto f = [n]() resumable
+  auto f = [n = int(10)]() resumable
   {
     while (--n > 0)
       if (n == 1) return n;

@@ -190,6 +190,15 @@ private:
       {
         os << "    __this_type __captured_this;\n";
       }
+      else if (c->isInitCapture())
+      {
+        std::string name = c->getCapturedVar()->getDeclName().getAsString();
+        std::string init = rewriter_.ConvertToString(c->getCapturedVar()->getInit());
+        os << "    decltype(" << init << ")";
+        if (c->getCaptureKind() == LCK_ByRef)
+          os << "&";
+        os << " __captured_" << name << ";\n";
+      }
       else
       {
         std::string name = c->getCapturedVar()->getDeclName().getAsString();
@@ -211,6 +220,12 @@ private:
       if (c->getCaptureKind() == LCK_This)
       {
         os << "      __this_type __capture_arg_this";
+      }
+      else if (c->isInitCapture())
+      {
+        std::string name = c->getCapturedVar()->getDeclName().getAsString();
+        std::string init = rewriter_.ConvertToString(c->getCapturedVar()->getInit());
+        os << "      decltype(" << init << ")&& __capture_arg_" << name;
       }
       else
       {
@@ -265,6 +280,8 @@ private:
       os << ",\n";
       if (c->getCaptureKind() == LCK_This)
         os << "    this";
+      else if (c->isInitCapture())
+        os << "    " << rewriter_.ConvertToString(c->getCapturedVar()->getInit());
       else
         os << "    " << c->getCapturedVar()->getDeclName().getAsString();
     }
