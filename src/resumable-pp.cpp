@@ -58,8 +58,17 @@ public:
     before << "\n";
     EmitConstructor(before, lambda_id, expr);
     before << "\n";
+    before << "    bool is_initial() const noexcept { return __state == 0; }\n";
+    before << "    bool is_terminal() const noexcept { return __state == -1; }\n";
+    before << "\n";
     EmitCallOperatorDecl(before, expr);
     before << "    {\n";
+    before << "      struct __term_check\n";
+    before << "      {\n";
+    before << "        int* __state;\n";
+    before << "        ~__term_check() { if (__state) *__state = -1; }\n";
+    before << "      } __term = { &__state };\n";
+    before << "\n";
     before << "      switch (__state)\n";
     before << "      case 0:\n";
     before << "      {\n";
@@ -69,6 +78,7 @@ public:
 
     std::stringstream after;
     after << "\n";
+    after << "      default: (void)0;\n";
     after << "      }\n";
     after << "    }\n";
     after << "  };\n";
@@ -146,7 +156,7 @@ public:
               SourceRange range(macro.first, macro.second);
 
               int yield_point = lambdas_.top().next_yield++;
-              rewriter_.ReplaceText(range, "{ __state = " + std::to_string(yield_point) + "; return");
+              rewriter_.ReplaceText(range, "{ __state = " + std::to_string(yield_point) + "; __term.__state = 0; return");
 
               auto end = Lexer::findLocationAfterToken(op->getFalseExpr()->getLocEnd(), tok::semi, rewriter_.getSourceMgr(), rewriter_.getLangOpts(), true);
               rewriter_.InsertTextAfter(end, " case " + std::to_string(yield_point) + ": (void)0; }");
@@ -322,7 +332,7 @@ int main(int argc, const char* argv[])
 
   std::vector<std::string> args;
   args.push_back("-std=c++1y");
-  args.push_back("-Dresumable=__attribute__((__annotate__(\"resumable\")))");
+  args.push_back("-Dresumable=__attribute__((__annotate__(\"resumable\"))) mutable");
   args.push_back("-Dyield=0?throw 99999999:throw");
   for (int arg = 2; arg < argc; ++arg)
     args.push_back(argv[arg]);
