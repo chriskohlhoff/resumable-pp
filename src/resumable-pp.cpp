@@ -1,12 +1,14 @@
 #include <sstream>
 #include <stack>
 #include <string>
+#include <utility>
 #include "clang/AST/AST.h"
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/Frontend/ASTConsumers.h"
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Frontend/CompilerInstance.h"
+#include "clang/Lex/Lexer.h"
 #include "clang/Tooling/CommonOptionsParser.h"
 #include "clang/Tooling/Tooling.h"
 #include "clang/Rewrite/Core/Rewriter.h"
@@ -15,6 +17,13 @@
 using namespace clang;
 using namespace clang::driver;
 using namespace clang::tooling;
+
+struct lambda
+{
+  int lambda_id;
+  LambdaExpr* expr;
+  int next_yield;
+};
 
 class visitor : public RecursiveASTVisitor<visitor>
 {
@@ -26,10 +35,12 @@ public:
 
   bool VisitLambdaExpr(LambdaExpr* expr)
   {
-    if (!expr->isMutable())
+    AnnotateAttr* attr = expr->getCallOperator()->getAttr<AnnotateAttr>();
+    if (!attr || attr->getAnnotation() != "resumable")
       return true;
 
-    lambdas_.push(expr);
+    int lambda_id = next_lambda_id_++;
+    lambdas_.push(lambda{lambda_id, expr, 1});
 
     CompoundStmt* body = expr->getBody();
     SourceRange beforeBody(expr->getLocStart(), body->getLocStart());
@@ -39,30 +50,33 @@ public:
     before << "/*BEGIN RESUMABLE LAMBDA DEFINITION*/\n\n";
     before << "[&]{\n";
     EmitThisTypedef(before, expr);
-    before << "  struct __resumable_lambda_" << counter_ << "\n";
+    before << "  struct __resumable_lambda_" << lambda_id << "\n";
     before << "  {\n";
     before << "    int __state;\n";
     EmitCaptureMembers(before, expr);
     before << "\n";
-    EmitConstructor(before, expr);
+    EmitConstructor(before, lambda_id, expr);
     before << "\n";
     EmitCallOperatorDecl(before, expr);
     before << "    {\n";
+    before << "      switch (__state)\n";
+    before << "      case 0:\n";
+    before << "      {\n";
     rewriter_.ReplaceText(beforeBody, before.str());
 
     TraverseCompoundStmt(body);
 
     std::stringstream after;
     after << "\n";
+    after << "      }\n";
     after << "    }\n";
     after << "  };\n";
-    EmitReturn(after, expr);
+    EmitReturn(after, lambda_id, expr);
     after << "}()\n\n";
     after << "/*END RESUMABLE LAMBDA DEFINITION*/";
     rewriter_.ReplaceText(afterBody, after.str());
 
     lambdas_.pop();
-    ++counter_;
 
     return true;
   }
@@ -71,7 +85,7 @@ public:
   {
     if (!lambdas_.empty())
     {
-      LambdaExpr* lambda = lambdas_.top();
+      LambdaExpr* lambda = lambdas_.top().expr;
       for (LambdaExpr::capture_iterator c = lambda->capture_begin(), e = lambda->capture_end(); c != e; ++c)
       {
         if (c->getCaptureKind() != LCK_This)
@@ -92,7 +106,7 @@ public:
   {
     if (!lambdas_.empty())
     {
-      LambdaExpr* lambda = lambdas_.top();
+      LambdaExpr* lambda = lambdas_.top().expr;
       for (LambdaExpr::capture_iterator c = lambda->capture_begin(), e = lambda->capture_end(); c != e; ++c)
       {
         if (c->getCaptureKind() == LCK_This)
@@ -105,6 +119,37 @@ public:
           {
             SourceRange range(expr->getLocStart(), expr->getLocEnd());
             rewriter_.ReplaceText(range, "__captured_this");
+          }
+        }
+      }
+    }
+
+    return true;
+  }
+
+  bool VisitConditionalOperator(ConditionalOperator* op)
+  {
+    if (!lambdas_.empty())
+    {
+      if (op->getLocStart().isMacroID())
+      {
+        if (CXXThrowExpr::classof(op->getTrueExpr()))
+        {
+          CXXThrowExpr* throw_expr = static_cast<CXXThrowExpr*>(op->getTrueExpr());
+          if (IntegerLiteral::classof(throw_expr->getSubExpr()))
+          {
+            IntegerLiteral* literal = static_cast<IntegerLiteral*>(throw_expr->getSubExpr());
+            if (literal->getValue() == 99999999)
+            {
+              auto macro = rewriter_.getSourceMgr().getImmediateExpansionRange(op->getLocStart());
+              SourceRange range(macro.first, macro.second);
+
+              int yield_point = lambdas_.top().next_yield++;
+              rewriter_.ReplaceText(range, "{ __state = " + std::to_string(yield_point) + "; return");
+
+              auto end = Lexer::findLocationAfterToken(op->getFalseExpr()->getLocEnd(), tok::semi, rewriter_.getSourceMgr(), rewriter_.getLangOpts(), true);
+              rewriter_.InsertTextAfter(end, " case " + std::to_string(yield_point) + ": (void)0; }");
+            }
           }
         }
       }
@@ -145,9 +190,9 @@ private:
     }
   }
 
-  void EmitConstructor(std::ostream& os, LambdaExpr* expr)
+  void EmitConstructor(std::ostream& os, int lambda_id, LambdaExpr* expr)
   {
-    os << "    explicit __resumable_lambda_" << counter_ << "(\n";
+    os << "    explicit __resumable_lambda_" << lambda_id << "(\n";
     os << "      int /*dummy*/";
     for (LambdaExpr::capture_iterator c = expr->capture_begin(), e = expr->capture_end(); c != e; ++c)
     {
@@ -185,7 +230,12 @@ private:
   void EmitCallOperatorDecl(std::ostream& os, LambdaExpr* expr)
   {
     CXXMethodDecl* method = expr->getCallOperator();
-    os << "    " << method->getReturnType().getAsString() << " operator()(";
+    os << "    ";
+    if (expr->hasExplicitResultType())
+      os << method->getReturnType().getAsString();
+    else
+      os << "auto";
+    os << " operator()(";
     for (FunctionDecl::param_iterator p = method->param_begin(), e = method->param_end(); p != e; ++p)
     {
       if (p != method->param_begin())
@@ -195,9 +245,9 @@ private:
     os << ")\n";
   }
 
-  void EmitReturn(std::ostream& os, LambdaExpr* expr)
+  void EmitReturn(std::ostream& os, int lambda_id, LambdaExpr* expr)
   {
-    os << "  return __resumable_lambda_" << counter_ << "(\n";
+    os << "  return __resumable_lambda_" << lambda_id << "(\n";
     os << "    0 /*dummy*/";
     for (LambdaExpr::capture_iterator c = expr->capture_begin(), e = expr->capture_end(); c != e; ++c)
     {
@@ -212,8 +262,8 @@ private:
   }
 
   Rewriter& rewriter_;
-  int counter_ = 0;
-  std::stack<LambdaExpr*> lambdas_;
+  int next_lambda_id_ = 0;
+  std::stack<lambda> lambdas_;
 };
 
 class consumer : public ASTConsumer

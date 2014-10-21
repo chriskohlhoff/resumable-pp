@@ -10,7 +10,7 @@ class foo
 public:
   void bar()
   {
-    run([=]() mutable { baz(this); });
+    run([=]() resumable { baz(this); });
   }
 
   void baz(foo*)
@@ -20,8 +20,8 @@ public:
 
 int main()
 {
-  auto f = [](int* i) mutable { return *i + 42; };
+  auto f = [](int* i) resumable { return *i + 42; };
   int i = 42;
   int j = 123;
-  run([=, &j]() mutable { std::cout << i << j << "\n"; });
+  run([=, &j]() resumable { std::cout << i << j << "\n"; });
 }
