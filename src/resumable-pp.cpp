@@ -144,26 +144,107 @@ public:
   {
     if (!lambdas_.empty())
     {
-      if (op->getLocStart().isMacroID())
+      if (Expr* after_yield = IsYieldKeyword(op))
       {
-        if (CXXThrowExpr::classof(op->getTrueExpr()))
+        if (Expr* after_from = IsFromKeyword(after_yield))
         {
-          CXXThrowExpr* throw_expr = static_cast<CXXThrowExpr*>(op->getTrueExpr());
-          if (IntegerLiteral::classof(throw_expr->getSubExpr()))
-          {
-            IntegerLiteral* literal = static_cast<IntegerLiteral*>(throw_expr->getSubExpr());
-            if (literal->getValue() == 99999999)
-            {
-              auto macro = rewriter_.getSourceMgr().getImmediateExpansionRange(op->getLocStart());
-              SourceRange range(macro.first, macro.second);
+          // "yield from"
 
-              int yield_point = lambdas_.top().next_yield++;
-              rewriter_.ReplaceText(range, "{ __state = " + std::to_string(yield_point) + "; __term.__state = 0; return");
+          auto yield = rewriter_.getSourceMgr().getImmediateExpansionRange(op->getLocStart());
+          auto from = rewriter_.getSourceMgr().getImmediateExpansionRange(after_yield->getLocStart());
+          auto end = Lexer::findLocationAfterToken(op->getLocEnd(), tok::semi, rewriter_.getSourceMgr(), rewriter_.getLangOpts(), true);
+          SourceRange range(yield.first, from.second);
 
-              auto end = Lexer::findLocationAfterToken(op->getFalseExpr()->getLocEnd(), tok::semi, rewriter_.getSourceMgr(), rewriter_.getLangOpts(), true);
-              rewriter_.InsertTextAfter(end, " case " + std::to_string(yield_point) + ": (void)0; }");
-            }
-          }
+          int yield_point = lambdas_.top().next_yield++;
+
+          std::stringstream before;
+          before << "\n";
+          before << "        for (;;)\n";
+          before << "        {\n";
+          before << "          {\n";
+          before << "            auto& __g =\n";
+          EmitLineNumber(before, after_from->getLocStart());
+          rewriter_.ReplaceText(range, before.str());
+
+          std::stringstream after;
+          after << "            if (__g.is_terminal()) break;\n";
+          after << "            __state = " << yield_point << ";\n";
+          after << "            __term.__state = 0;\n";
+          after << "            return __g();\n";
+          after << "          }\n";
+          after << "        case " << yield_point << ":\n";
+          after << "          (void)0;\n";
+          after << "        }\n";
+          rewriter_.InsertTextAfter(end, after.str());
+        }
+        else
+        {
+          // "yield"
+
+          auto yield = rewriter_.getSourceMgr().getImmediateExpansionRange(op->getLocStart());
+          auto end = Lexer::findLocationAfterToken(op->getLocEnd(), tok::semi, rewriter_.getSourceMgr(), rewriter_.getLangOpts(), true);
+          SourceRange range(yield.first, yield.second);
+
+          int yield_point = lambdas_.top().next_yield++;
+
+          std::stringstream before;
+          before << "\n";
+          before << "        {\n";
+          before << "          __state = " << yield_point << ";\n";
+          before << "          __term.__state = 0;\n";
+          before << "          return\n";
+          EmitLineNumber(before, after_yield->getLocStart());
+          rewriter_.ReplaceText(range, before.str());
+
+          std::stringstream after;
+          after << "        case " << yield_point << ":\n";
+          after << "          (void)0;\n";
+          after << "        }\n";
+          rewriter_.InsertTextAfter(end, after.str());
+        }
+      }
+    }
+
+    return true;
+  }
+
+  bool VisitReturnStmt(ReturnStmt* stmt)
+  {
+    if (!lambdas_.empty())
+    {
+      if (stmt->getRetValue())
+      {
+        if (Expr* after_from = IsFromKeyword(stmt->getRetValue()))
+        {
+          // "return from"
+
+          auto from = rewriter_.getSourceMgr().getImmediateExpansionRange(stmt->getRetValue()->getLocStart());
+          auto end = Lexer::findLocationAfterToken(stmt->getLocEnd(), tok::semi, rewriter_.getSourceMgr(), rewriter_.getLangOpts(), true);
+          SourceRange range(stmt->getLocStart(), from.second);
+
+          int yield_point = lambdas_.top().next_yield++;
+
+          std::stringstream before;
+          before << "\n";
+          before << "        for (;;)\n";
+          before << "        {\n";
+          before << "          {\n";
+          before << "            auto& __g =\n";
+          EmitLineNumber(before, after_from->getLocStart());
+          rewriter_.ReplaceText(range, before.str());
+
+          std::stringstream after;
+          after << "            __state = " << yield_point << ";\n";
+          after << "            __term.__state = 0;\n";
+          after << "            auto __ret(__g());\n";
+          after << "            if (__g.is_terminal())\n";
+          after << "              __state = -1;\n";
+          after << "            return __ret;\n";
+          after << "          }\n";
+          after << "        case " << yield_point << ":\n";
+          after << "          (void)0;\n";
+          after << "        }\n";
+          rewriter_.InsertTextAfter(end, after.str());
         }
       }
     }
@@ -172,6 +253,71 @@ public:
   }
 
 private:
+  Expr* IsYieldKeyword(Stmt* stmt)
+  {
+    if (ConditionalOperator::classof(stmt))
+    {
+      ConditionalOperator* op = static_cast<ConditionalOperator*>(stmt);
+      if (op->getLocStart().isMacroID())
+      {
+        if (CXXThrowExpr::classof(op->getTrueExpr()))
+        {
+          CXXThrowExpr* true_throw_expr = static_cast<CXXThrowExpr*>(op->getTrueExpr());
+          if (IntegerLiteral::classof(true_throw_expr->getSubExpr()))
+          {
+            IntegerLiteral* literal = static_cast<IntegerLiteral*>(true_throw_expr->getSubExpr());
+            if (literal->getValue() == 99999999)
+            {
+              if (CXXThrowExpr::classof(op->getFalseExpr()))
+              {
+                CXXThrowExpr* false_throw_expr = static_cast<CXXThrowExpr*>(op->getFalseExpr());
+                return false_throw_expr->getSubExpr();
+              }
+            }
+          }
+        }
+      }
+    }
+
+    return nullptr;
+  }
+
+  Expr* IsFromKeyword(Stmt* stmt)
+  {
+    if (CXXConstructExpr::classof(stmt))
+    {
+      CXXConstructExpr* expr = static_cast<CXXConstructExpr*>(stmt);
+      if (expr->getNumArgs() != 1)
+        return nullptr;
+      stmt = expr->getArg(0);
+    }
+
+    if (ImplicitCastExpr::classof(stmt))
+      stmt = static_cast<ImplicitCastExpr*>(stmt)->getSubExpr();
+
+    if (ConditionalOperator::classof(stmt))
+    {
+      ConditionalOperator* op = static_cast<ConditionalOperator*>(stmt);
+      if (op->getLocStart().isMacroID())
+      {
+        if (CXXThrowExpr::classof(op->getTrueExpr()))
+        {
+          CXXThrowExpr* true_throw_expr = static_cast<CXXThrowExpr*>(op->getTrueExpr());
+          if (IntegerLiteral::classof(true_throw_expr->getSubExpr()))
+          {
+            IntegerLiteral* literal = static_cast<IntegerLiteral*>(true_throw_expr->getSubExpr());
+            if (literal->getValue() == 99999998)
+            {
+              return op->getFalseExpr();
+            }
+          }
+        }
+      }
+    }
+
+    return nullptr;
+  }
+
   void EmitThisTypedef(std::ostream& os, LambdaExpr* expr)
   {
     for (LambdaExpr::capture_iterator c = expr->capture_begin(), e = expr->capture_end(); c != e; ++c)
@@ -363,6 +509,7 @@ int main(int argc, const char* argv[])
   args.push_back("-std=c++1y");
   args.push_back("-Dresumable=__attribute__((__annotate__(\"resumable\"))) mutable");
   args.push_back("-Dyield=0?throw 99999999:throw");
+  args.push_back("-Dfrom=0?throw 99999998:");
   for (int arg = 2; arg < argc; ++arg)
     args.push_back(argv[arg]);
 
