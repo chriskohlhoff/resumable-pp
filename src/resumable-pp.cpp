@@ -144,7 +144,16 @@ public:
   {
     if (!lambdas_.empty())
     {
-      if (Expr* after_yield = IsYieldKeyword(op))
+      if (IsLambdaThisKeyword(op))
+      {
+        // "lambda_this" - approximation of "[]this"
+
+        auto lambda_this = rewriter_.getSourceMgr().getImmediateExpansionRange(op->getLocStart());
+        SourceRange range(lambda_this.first, lambda_this.second);
+
+        rewriter_.ReplaceText(range, "this");
+      }
+      else if (Expr* after_yield = IsYieldKeyword(op))
       {
         if (Expr* after_from = IsFromKeyword(after_yield))
         {
@@ -316,6 +325,31 @@ private:
     }
 
     return nullptr;
+  }
+
+  bool IsLambdaThisKeyword(Stmt* stmt)
+  {
+    if (ConditionalOperator::classof(stmt))
+    {
+      ConditionalOperator* op = static_cast<ConditionalOperator*>(stmt);
+      if (op->getLocStart().isMacroID())
+      {
+        if (CXXThrowExpr::classof(op->getTrueExpr()))
+        {
+          CXXThrowExpr* true_throw_expr = static_cast<CXXThrowExpr*>(op->getTrueExpr());
+          if (IntegerLiteral::classof(true_throw_expr->getSubExpr()))
+          {
+            IntegerLiteral* literal = static_cast<IntegerLiteral*>(true_throw_expr->getSubExpr());
+            if (literal->getValue() == 99999997)
+            {
+              return true;
+            }
+          }
+        }
+      }
+    }
+
+    return false;
   }
 
   void EmitThisTypedef(std::ostream& os, LambdaExpr* expr)
@@ -510,6 +544,7 @@ int main(int argc, const char* argv[])
   args.push_back("-Dresumable=__attribute__((__annotate__(\"resumable\"))) mutable");
   args.push_back("-Dyield=0?throw 99999999:throw");
   args.push_back("-Dfrom=0?throw 99999998:");
+  args.push_back("-Dlambda_this=(0?throw 99999997:((void(*)())0))");
   for (int arg = 2; arg < argc; ++arg)
     args.push_back(argv[arg]);
 
