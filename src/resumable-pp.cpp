@@ -10,6 +10,7 @@
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Lex/Lexer.h"
+#include "clang/Lex/Preprocessor.h"
 #include "clang/Tooling/CommonOptionsParser.h"
 #include "clang/Tooling/Tooling.h"
 #include "clang/Rewrite/Core/Rewriter.h"
@@ -107,16 +108,7 @@ public:
 
   bool VisitConditionalOperator(ConditionalOperator* op)
   {
-    if (IsLambdaThisKeyword(op))
-    {
-      // "lambda_this" - approximation of "[]this"
-
-      auto lambda_this = rewriter_.getSourceMgr().getImmediateExpansionRange(op->getLocStart());
-      SourceRange range(lambda_this.first, lambda_this.second);
-
-      rewriter_.ReplaceText(range, "this");
-    }
-    else if (Expr* after_yield = IsYieldKeyword(op))
+    if (Expr* after_yield = IsYieldKeyword(op))
     {
       if (Expr* after_from = IsFromKeyword(after_yield))
       {
@@ -181,40 +173,49 @@ public:
 
   bool VisitReturnStmt(ReturnStmt* stmt)
   {
-    if (stmt->getRetValue())
+    if (Expr* after_from = IsFromKeyword(stmt->getRetValue()))
     {
-      if (Expr* after_from = IsFromKeyword(stmt->getRetValue()))
-      {
-        // "return from"
+      // "return from"
 
-        auto from = rewriter_.getSourceMgr().getImmediateExpansionRange(stmt->getRetValue()->getLocStart());
-        auto end = Lexer::findLocationAfterToken(stmt->getLocEnd(), tok::semi, rewriter_.getSourceMgr(), rewriter_.getLangOpts(), true);
-        SourceRange range(stmt->getLocStart(), from.second);
+      auto from = rewriter_.getSourceMgr().getImmediateExpansionRange(stmt->getRetValue()->getLocStart());
+      auto end = Lexer::findLocationAfterToken(stmt->getLocEnd(), tok::semi, rewriter_.getSourceMgr(), rewriter_.getLangOpts(), true);
+      SourceRange range(stmt->getLocStart(), from.second);
 
-        int yield_point = next_yield_++;
+      int yield_point = next_yield_++;
 
-        std::stringstream before;
-        before << "\n";
-        before << "        for (;;)\n";
-        before << "        {\n";
-        before << "          {\n";
-        before << "            auto& __g =\n";
-        EmitLineNumber(before, after_from->getLocStart());
-        rewriter_.ReplaceText(range, before.str());
+      std::stringstream before;
+      before << "\n";
+      before << "        for (;;)\n";
+      before << "        {\n";
+      before << "          {\n";
+      before << "            auto& __g =\n";
+      EmitLineNumber(before, after_from->getLocStart());
+      rewriter_.ReplaceText(range, before.str());
 
-        std::stringstream after;
-        after << "            __state = " << yield_point << ";\n";
-        after << "            __term.__state = 0;\n";
-        after << "            auto __ret(__g());\n";
-        after << "            if (__g.is_terminal())\n";
-        after << "              __state = -1;\n";
-        after << "            return __ret;\n";
-        after << "          }\n";
-        after << "        case " << yield_point << ":\n";
-        after << "          (void)0;\n";
-        after << "        }\n";
-        rewriter_.InsertTextAfter(end, after.str());
-      }
+      std::stringstream after;
+      after << "            __state = " << yield_point << ";\n";
+      after << "            __term.__state = 0;\n";
+      after << "            auto __ret(__g());\n";
+      after << "            if (__g.is_terminal())\n";
+      after << "              __state = -1;\n";
+      after << "            return __ret;\n";
+      after << "          }\n";
+      after << "        case " << yield_point << ":\n";
+      after << "          (void)0;\n";
+      after << "        }\n";
+      rewriter_.InsertTextAfter(end, after.str());
+    }
+
+    return true;
+  }
+
+  bool VisitDeclRefExpr(DeclRefExpr* expr)
+  {
+    if (expr->getDecl()->getType().getAsString() == "const struct __lambda_this_t")
+    {
+      auto yield = rewriter_.getSourceMgr().getImmediateExpansionRange(expr->getLocStart());
+      SourceRange range(yield.first, yield.second);
+      rewriter_.ReplaceText(range, "this");
     }
 
     return true;
@@ -223,92 +224,34 @@ public:
 private:
   Expr* IsYieldKeyword(Stmt* stmt)
   {
-    if (ConditionalOperator::classof(stmt))
-    {
-      ConditionalOperator* op = static_cast<ConditionalOperator*>(stmt);
+    if (ConditionalOperator* op = dyn_cast<ConditionalOperator>(stmt))
       if (op->getLocStart().isMacroID())
-      {
-        if (CXXThrowExpr::classof(op->getTrueExpr()))
-        {
-          CXXThrowExpr* true_throw_expr = static_cast<CXXThrowExpr*>(op->getTrueExpr());
-          if (IntegerLiteral::classof(true_throw_expr->getSubExpr()))
-          {
-            IntegerLiteral* literal = static_cast<IntegerLiteral*>(true_throw_expr->getSubExpr());
-            if (literal->getValue() == 99999999)
-            {
-              if (CXXThrowExpr::classof(op->getFalseExpr()))
-              {
-                CXXThrowExpr* false_throw_expr = static_cast<CXXThrowExpr*>(op->getFalseExpr());
+        if (CXXThrowExpr* true_throw_expr = dyn_cast<CXXThrowExpr>(op->getTrueExpr()))
+          if (CXXConstructExpr* construct_expr = dyn_cast<CXXConstructExpr>(true_throw_expr->getSubExpr()))
+            if (construct_expr->getType().getAsString() == "struct __yield_t")
+              if (CXXThrowExpr* false_throw_expr = dyn_cast<CXXThrowExpr>(op->getFalseExpr()))
                 return false_throw_expr->getSubExpr();
-              }
-            }
-          }
-        }
-      }
-    }
-
     return nullptr;
   }
 
   Expr* IsFromKeyword(Stmt* stmt)
   {
-    if (CXXConstructExpr::classof(stmt))
-    {
-      CXXConstructExpr* expr = static_cast<CXXConstructExpr*>(stmt);
-      if (expr->getNumArgs() != 1)
-        return nullptr;
-      stmt = expr->getArg(0);
-    }
-
-    if (ImplicitCastExpr::classof(stmt))
-      stmt = static_cast<ImplicitCastExpr*>(stmt)->getSubExpr();
-
-    if (ConditionalOperator::classof(stmt))
-    {
-      ConditionalOperator* op = static_cast<ConditionalOperator*>(stmt);
-      if (op->getLocStart().isMacroID())
-      {
-        if (CXXThrowExpr::classof(op->getTrueExpr()))
-        {
-          CXXThrowExpr* true_throw_expr = static_cast<CXXThrowExpr*>(op->getTrueExpr());
-          if (IntegerLiteral::classof(true_throw_expr->getSubExpr()))
-          {
-            IntegerLiteral* literal = static_cast<IntegerLiteral*>(true_throw_expr->getSubExpr());
-            if (literal->getValue() == 99999998)
-            {
-              return op->getFalseExpr();
-            }
-          }
-        }
-      }
-    }
-
+    if (CXXConstructExpr* construct_expr = dyn_cast<CXXConstructExpr>(stmt))
+      if (construct_expr->getNumArgs() == 1)
+        if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(construct_expr->getArg(0)))
+          if (CXXOperatorCallExpr* call_expr = dyn_cast<CXXOperatorCallExpr>(temp->getTemporary()))
+            if (call_expr->getNumArgs() == 2)
+              if (call_expr->getArg(0)->getType().getAsString() == "const struct __from_t")
+                return call_expr->getArg(1);
+    if (ImplicitCastExpr* cast_expr = dyn_cast<ImplicitCastExpr>(stmt))
+      if (CXXMemberCallExpr* call_expr = dyn_cast<CXXMemberCallExpr>(cast_expr->getSubExpr()))
+        if (MemberExpr* member_expr = dyn_cast<MemberExpr>(call_expr->getCallee()))
+          if (ImplicitCastExpr* cast_expr_2 = dyn_cast<ImplicitCastExpr>(member_expr->getBase()))
+            if (CXXOperatorCallExpr* call_expr = dyn_cast<CXXOperatorCallExpr>(cast_expr_2->getSubExpr()))
+              if (call_expr->getNumArgs() == 2)
+                if (call_expr->getArg(0)->getType().getAsString() == "const struct __from_t")
+                  return call_expr->getArg(1);
     return nullptr;
-  }
-
-  bool IsLambdaThisKeyword(Stmt* stmt)
-  {
-    if (ConditionalOperator::classof(stmt))
-    {
-      ConditionalOperator* op = static_cast<ConditionalOperator*>(stmt);
-      if (op->getLocStart().isMacroID())
-      {
-        if (CXXThrowExpr::classof(op->getTrueExpr()))
-        {
-          CXXThrowExpr* true_throw_expr = static_cast<CXXThrowExpr*>(op->getTrueExpr());
-          if (IntegerLiteral::classof(true_throw_expr->getSubExpr()))
-          {
-            IntegerLiteral* literal = static_cast<IntegerLiteral*>(true_throw_expr->getSubExpr());
-            if (literal->getValue() == 99999997)
-            {
-              return true;
-            }
-          }
-        }
-      }
-    }
-
-    return false;
   }
 
   void EmitCaptureTypedefs(std::ostream& os)
@@ -439,10 +382,14 @@ private:
 
   void EmitLineNumber(std::ostream& os, SourceLocation location)
   {
-    os << "#line ";
-    os << rewriter_.getSourceMgr().getExpansionLineNumber(location);
-    os << " \"" << rewriter_.getSourceMgr().getFilename(location).data() << "\"";
-    os << "\n";
+    StringRef file_name = rewriter_.getSourceMgr().getFilename(location);
+    if (file_name.data())
+    {
+      os << "#line ";
+      os << rewriter_.getSourceMgr().getExpansionLineNumber(location);
+      os << " \"" << file_name.data() << "\"";
+      os << "\n";
+    }
   }
 
   Rewriter& rewriter_;
@@ -481,8 +428,8 @@ public:
   {
     for (DeclGroupRef::iterator b = decls.begin(), e = decls.end(); b != e; ++b)
     {
-      visitor_.TraverseDecl(*b);
       (*b)->dump();
+      visitor_.TraverseDecl(*b);
     }
 
     return true;
@@ -492,9 +439,82 @@ private:
   main_visitor visitor_;
 };
 
-class action : public ASTFrontendAction
+const char injected[] = R"-(
+
+struct __yield_t
+{
+  constexpr __yield_t() {}
+  template <class T> operator T() const;
+  template <class T> __yield_t operator&(const T&) const;
+};
+
+constexpr __yield_t __yield;
+
+struct __from_t
+{
+  constexpr __from_t() {}
+  template <class T> operator T() const;
+  template <class T> __from_t operator&(const T&) const;
+};
+
+constexpr __from_t __from;
+
+struct __lambda_this_t
+{
+  constexpr __lambda_this_t() {}
+  template <class T> operator T() const;
+  __lambda_this_t operator*() const;
+  void operator()() const;
+};
+
+constexpr __lambda_this_t __lambda_this;
+
+#define resumable __attribute__((__annotate__("resumable"))) mutable
+#define yield 0 ? throw __yield : throw
+#define from __from&
+#define lambda_this __lambda_this
+
+)-";
+
+class preprocess_callbacks : public PPCallbacks
 {
 public:
+  explicit preprocess_callbacks(Preprocessor& pp)
+    : preprocessor_(pp)
+  {
+  }
+
+  void FileChanged(SourceLocation loc, FileChangeReason reason, SrcMgr::CharacteristicKind type, FileID prev_fid)
+  {
+    SourceManager &source_mgr = preprocessor_.getSourceManager();
+    const FileEntry* file_entry = source_mgr.getFileEntryForID(source_mgr.getFileID(source_mgr.getExpansionLoc(loc)));
+    if (!file_entry)
+      return;
+
+    if (reason != EnterFile)
+      return;
+
+    if (source_mgr.getFileID(source_mgr.getFileLoc(loc)) == source_mgr.getMainFileID())
+    {
+      auto buf = llvm::MemoryBuffer::getMemBuffer(injected, "resumable-pp-injected");
+      loc = source_mgr.getFileLoc(loc);
+      preprocessor_.EnterSourceFile(source_mgr.createFileID(buf, SrcMgr::C_User, 0, 0, loc), nullptr, loc);
+    }
+  }
+
+private:
+  Preprocessor& preprocessor_;
+};
+
+class frontend_action : public ASTFrontendAction
+{
+public:
+  bool BeginSourceFileAction(CompilerInstance& compiler, StringRef file_name) override
+  {
+    compiler.getPreprocessor().addPPCallbacks(new preprocess_callbacks(compiler.getPreprocessor()));
+    return true;
+  }
+
   void EndSourceFileAction() override
   {
     SourceManager& mgr = rewriter_.getSourceMgr();
@@ -526,10 +546,6 @@ int main(int argc, const char* argv[])
 
   std::vector<std::string> args;
   args.push_back("-std=c++1y");
-  args.push_back("-Dresumable=__attribute__((__annotate__(\"resumable\"))) mutable");
-  args.push_back("-Dyield=0?throw 99999999:throw");
-  args.push_back("-Dfrom=0?throw 99999998:");
-  args.push_back("-Dlambda_this=(0?throw 99999997:((void(*)())0))");
   for (int arg = 2; arg < argc; ++arg)
     args.push_back(argv[arg]);
 
@@ -538,5 +554,5 @@ int main(int argc, const char* argv[])
 
   FixedCompilationDatabase cdb(".", args);
   ClangTool tool(cdb, files);
-  return tool.run(newFrontendActionFactory<action>().get());
+  return tool.run(newFrontendActionFactory<frontend_action>().get());
 }
