@@ -205,10 +205,17 @@ public:
     before << "/*BEGIN RESUMABLE LAMBDA DEFINITION*/\n\n";
     before << "[&]{\n";
     EmitCaptureTypedefs(before);
-    before << "  struct __resumable_lambda_" << lambda_id_ << "\n";
+    before << "  struct __resumable_lambda_" << lambda_id_ << "_capture\n";
+    before << "  {\n";
+    EmitCaptureConstructor(before);
+    before << "\n";
+    EmitCaptureMembers(before);
+    before << "  };\n";
+    before << "\n";
+    before << "  struct __resumable_lambda_" << lambda_id_ << " :\n";
+    before << "    __resumable_lambda_" << lambda_id_ << "_capture\n";
     before << "  {\n";
     before << "    int __state;\n";
-    EmitCaptureMembers(before);
     before << "\n";
     EmitConstructor(before);
     before << "\n";
@@ -409,6 +416,54 @@ private:
       os << "\n";
   }
 
+  void EmitCaptureConstructor(std::ostream& os)
+  {
+    os << "    explicit __resumable_lambda_" << lambda_id_ << "_capture(int /*dummy*/";
+    for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
+    {
+      os << ",\n";
+      if (c->getCaptureKind() == LCK_This)
+        os << "        __resumable_lambda_" << lambda_id_ << "_this_type __capture_arg_this";
+      else if (c->isInitCapture())
+      {
+        std::string name = c->getCapturedVar()->getDeclName().getAsString();
+        os << "        __resumable_lambda_" << lambda_id_ << "_" << name << "_type&& __capture_arg_" << name;
+      }
+      else if (c->getCaptureKind() == LCK_ByRef)
+      {
+        std::string name = c->getCapturedVar()->getDeclName().getAsString();
+        os << "        __resumable_lambda_" << lambda_id_ << "_" << name << "_type& __capture_arg_" << name;
+      }
+      else
+      {
+        std::string name = c->getCapturedVar()->getDeclName().getAsString();
+        os << "        const __resumable_lambda_" << lambda_id_ << "_" << name << "_type& __capture_arg_" << name;
+      }
+    }
+    os << ")";
+    for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
+    {
+      os << (c == lambda_expr_->capture_begin() ? " :\n" : ",\n");
+      if (c->getCaptureKind() == LCK_This)
+      {
+        os << "      __this(__capture_arg_this)";
+      }
+      else if (c->isInitCapture())
+      {
+        std::string name = c->getCapturedVar()->getDeclName().getAsString();
+        os << "      " << name << "(static_cast<__resumable_lambda_" << lambda_id_ << "_" << name << "_type&&>(__capture_arg_" << name << "))";
+      }
+      else
+      {
+        std::string name = c->getCapturedVar()->getDeclName().getAsString();
+        os << "      " << name << "(__capture_arg_" << name << ")";
+      }
+    }
+    os << "\n";
+    os << "    {\n";
+    os << "    }\n";
+  }
+
   void EmitCaptureMembers(std::ostream& os)
   {
     for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
@@ -430,43 +485,51 @@ private:
 
   void EmitConstructor(std::ostream& os)
   {
-    os << "    explicit __resumable_lambda_" << lambda_id_ << "(\n";
-    os << "      int /*dummy*/";
+    os << "    explicit __resumable_lambda_" << lambda_id_ << "(int /*dummy*/";
     for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
     {
       os << ",\n";
       if (c->getCaptureKind() == LCK_This)
       {
-        os << "      __resumable_lambda_" << lambda_id_ << "_this_type __capture_arg_this";
+        os << "        __resumable_lambda_" << lambda_id_ << "_this_type __capture_arg_this";
       }
       else if (c->isInitCapture())
       {
         std::string name = c->getCapturedVar()->getDeclName().getAsString();
         std::string init = rewriter_.ConvertToString(c->getCapturedVar()->getInit());
-        os << "      __resumable_lambda_" << lambda_id_ << "_" << name << "_type&& __capture_arg_" << name;
+        os << "        __resumable_lambda_" << lambda_id_ << "_" << name << "_type&& __capture_arg_" << name;
+      }
+      else if (c->getCaptureKind() == LCK_ByRef)
+      {
+        std::string name = c->getCapturedVar()->getDeclName().getAsString();
+        os << "        __resumable_lambda_" << lambda_id_ << "_" << name << "_type& __capture_arg_" << name;
       }
       else
       {
         std::string name = c->getCapturedVar()->getDeclName().getAsString();
-        os << "      __resumable_lambda_" << lambda_id_ << "_" << name << "_type& __capture_arg_" << name;
+        os << "        const __resumable_lambda_" << lambda_id_ << "_" << name << "_type& __capture_arg_" << name;
       }
     }
-    os << ")\n";
-    os << "    : __state(0)";
+    os << ") :\n";
+    os << "      __resumable_lambda_" << lambda_id_ << "_capture(0 /*dummy*/";
     for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
     {
       os << ",\n";
       if (c->getCaptureKind() == LCK_This)
+        os << "          __capture_arg_this";
+      else if (c->isInitCapture())
       {
-        os << "      __this(__capture_arg_this)";
+        std::string name = c->getCapturedVar()->getDeclName().getAsString();
+        os << "          static_cast<__resumable_lambda_" << lambda_id_ << "_" << name << "_type&&>(__capture_arg_" << name << ")";
       }
       else
       {
         std::string name = c->getCapturedVar()->getDeclName().getAsString();
-        os << "      " << name << "(__capture_arg_" << name << ")";
+        os << "          __capture_arg_" << name;
       }
     }
-    os << "\n";
+    os << "),\n";
+    os << "      __state(0)\n";
     os << "    {\n";
     os << "    }\n";
   }
@@ -491,8 +554,7 @@ private:
 
   void EmitReturn(std::ostream& os)
   {
-    os << "  return __resumable_lambda_" << lambda_id_ << "(\n";
-    os << "    0 /*dummy*/";
+    os << "  return __resumable_lambda_" << lambda_id_ << "(0 /*dummy*/";
     for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
     {
       os << ",\n";
