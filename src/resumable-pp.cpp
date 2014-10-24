@@ -20,7 +20,81 @@ using namespace clang;
 using namespace clang::driver;
 using namespace clang::tooling;
 
-static int next_lambda_id_ = 0;
+//------------------------------------------------------------------------------
+// The following code is injected at the beginning of the preprocessed input.
+
+const char injected[] = R"-(
+
+struct __yield_t
+{
+  constexpr __yield_t() {}
+  template <class T> operator T() const;
+  template <class T> __yield_t operator&(const T&) const;
+};
+
+constexpr __yield_t __yield;
+
+struct __from_t
+{
+  constexpr __from_t() {}
+  template <class T> operator T() const;
+  template <class T> __from_t operator&(const T&) const;
+};
+
+constexpr __from_t __from;
+
+struct __lambda_this_t
+{
+  constexpr __lambda_this_t() {}
+  template <class T> operator T() const;
+  __lambda_this_t operator*() const;
+  void operator()() const;
+};
+
+constexpr __lambda_this_t __lambda_this;
+
+#define resumable __attribute__((__annotate__("resumable"))) mutable
+#define yield 0 ? throw __yield : throw
+#define from __from&
+#define lambda_this __lambda_this
+
+)-";
+
+//------------------------------------------------------------------------------
+// Class to inject code at the beginning of the input.
+
+class code_injector : public PPCallbacks
+{
+public:
+  explicit code_injector(Preprocessor& pp)
+    : preprocessor_(pp)
+  {
+  }
+
+  void FileChanged(SourceLocation loc, FileChangeReason reason, SrcMgr::CharacteristicKind type, FileID prev_fid)
+  {
+    SourceManager &source_mgr = preprocessor_.getSourceManager();
+    const FileEntry* file_entry = source_mgr.getFileEntryForID(source_mgr.getFileID(source_mgr.getExpansionLoc(loc)));
+    if (!file_entry)
+      return;
+
+    if (reason != EnterFile)
+      return;
+
+    if (source_mgr.getFileID(source_mgr.getFileLoc(loc)) == source_mgr.getMainFileID())
+    {
+      auto buf = llvm::MemoryBuffer::getMemBuffer(injected, "resumable-pp-injected");
+      loc = source_mgr.getFileLoc(loc);
+      preprocessor_.EnterSourceFile(source_mgr.createFileID(buf, SrcMgr::C_User, 0, 0, loc), nullptr, loc);
+    }
+  }
+
+private:
+  Preprocessor& preprocessor_;
+};
+
+//------------------------------------------------------------------------------
+// Helper function to detect whether an AST node is a "yield" keyword.
 
 Expr* IsYieldKeyword(Stmt* stmt)
 {
@@ -33,6 +107,9 @@ Expr* IsYieldKeyword(Stmt* stmt)
               return false_throw_expr->getSubExpr();
   return nullptr;
 }
+
+//------------------------------------------------------------------------------
+// Helper function to detect whether an AST node is a "from" keyword.
 
 Expr* IsFromKeyword(Stmt* stmt)
 {
@@ -53,6 +130,11 @@ Expr* IsFromKeyword(Stmt* stmt)
                 return call_expr->getArg(1);
   return nullptr;
 }
+
+//------------------------------------------------------------------------------
+// Class to determine whether a lambda is a recursive lambda based on:
+// - Being explicitly marked "resumable"
+// - Using "yield", "yield from" or "return from" in the body.
 
 class resumable_lambda_detector : public RecursiveASTVisitor<resumable_lambda_detector>
 {
@@ -96,17 +178,21 @@ private:
   int nesting_level_ = 0;
 };
 
-class lambda_visitor : public RecursiveASTVisitor<lambda_visitor>
+//------------------------------------------------------------------------------
+// This class is responsible for the main job of generating the code associated
+// with a resumable lambda.
+
+class resumable_lambda_codegen : public RecursiveASTVisitor<resumable_lambda_codegen>
 {
 public:
-  lambda_visitor(Rewriter& r, LambdaExpr* expr)
+  resumable_lambda_codegen(Rewriter& r, LambdaExpr* expr)
     : rewriter_(r),
       lambda_expr_(expr),
       lambda_id_(next_lambda_id_++)
   {
   }
 
-  void Go()
+  void Generate()
   {
     if (!resumable_lambda_detector().IsResumable(lambda_expr_))
       return;
@@ -437,7 +523,13 @@ private:
   LambdaExpr* lambda_expr_;
   int lambda_id_;
   int next_yield_ = 1;
+  static int next_lambda_id_;
 };
+
+int resumable_lambda_codegen::next_lambda_id_ = 0;
+
+//------------------------------------------------------------------------------
+// This class visits the AST looking for potential resumable lambdas.
 
 class main_visitor : public RecursiveASTVisitor<main_visitor>
 {
@@ -449,13 +541,16 @@ public:
 
   bool VisitLambdaExpr(LambdaExpr* expr)
   {
-    lambda_visitor(rewriter_, expr).Go();
+    resumable_lambda_codegen(rewriter_, expr).Generate();
     return true;
   }
 
 private:
   Rewriter& rewriter_;
 };
+
+//------------------------------------------------------------------------------
+// This class is used by the compiler to process all top level declarations.
 
 class consumer : public ASTConsumer
 {
@@ -480,79 +575,15 @@ private:
   main_visitor visitor_;
 };
 
-const char injected[] = R"-(
-
-struct __yield_t
-{
-  constexpr __yield_t() {}
-  template <class T> operator T() const;
-  template <class T> __yield_t operator&(const T&) const;
-};
-
-constexpr __yield_t __yield;
-
-struct __from_t
-{
-  constexpr __from_t() {}
-  template <class T> operator T() const;
-  template <class T> __from_t operator&(const T&) const;
-};
-
-constexpr __from_t __from;
-
-struct __lambda_this_t
-{
-  constexpr __lambda_this_t() {}
-  template <class T> operator T() const;
-  __lambda_this_t operator*() const;
-  void operator()() const;
-};
-
-constexpr __lambda_this_t __lambda_this;
-
-#define resumable __attribute__((__annotate__("resumable"))) mutable
-#define yield 0 ? throw __yield : throw
-#define from __from&
-#define lambda_this __lambda_this
-
-)-";
-
-class preprocess_callbacks : public PPCallbacks
-{
-public:
-  explicit preprocess_callbacks(Preprocessor& pp)
-    : preprocessor_(pp)
-  {
-  }
-
-  void FileChanged(SourceLocation loc, FileChangeReason reason, SrcMgr::CharacteristicKind type, FileID prev_fid)
-  {
-    SourceManager &source_mgr = preprocessor_.getSourceManager();
-    const FileEntry* file_entry = source_mgr.getFileEntryForID(source_mgr.getFileID(source_mgr.getExpansionLoc(loc)));
-    if (!file_entry)
-      return;
-
-    if (reason != EnterFile)
-      return;
-
-    if (source_mgr.getFileID(source_mgr.getFileLoc(loc)) == source_mgr.getMainFileID())
-    {
-      auto buf = llvm::MemoryBuffer::getMemBuffer(injected, "resumable-pp-injected");
-      loc = source_mgr.getFileLoc(loc);
-      preprocessor_.EnterSourceFile(source_mgr.createFileID(buf, SrcMgr::C_User, 0, 0, loc), nullptr, loc);
-    }
-  }
-
-private:
-  Preprocessor& preprocessor_;
-};
+//------------------------------------------------------------------------------
+// This class handles notifications from the compiler frontend.
 
 class frontend_action : public ASTFrontendAction
 {
 public:
   bool BeginSourceFileAction(CompilerInstance& compiler, StringRef file_name) override
   {
-    compiler.getPreprocessor().addPPCallbacks(new preprocess_callbacks(compiler.getPreprocessor()));
+    compiler.getPreprocessor().addPPCallbacks(new code_injector(compiler.getPreprocessor()));
     return true;
   }
 
@@ -576,6 +607,8 @@ public:
 private:
   Rewriter rewriter_;
 };
+
+//------------------------------------------------------------------------------
 
 int main(int argc, const char* argv[])
 {
