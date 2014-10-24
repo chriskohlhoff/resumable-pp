@@ -44,7 +44,7 @@ public:
     std::stringstream before;
     before << "/*BEGIN RESUMABLE LAMBDA DEFINITION*/\n\n";
     before << "[&]{\n";
-    EmitThisTypedef(before);
+    EmitCaptureTypedefs(before);
     before << "  struct __resumable_lambda_" << lambda_id_ << "\n";
     before << "  {\n";
     before << "    int __state;\n";
@@ -84,23 +84,6 @@ public:
     rewriter_.ReplaceText(afterBody, after.str());
   }
 
-  bool VisitDeclRefExpr(DeclRefExpr* expr)
-  {
-    for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
-    {
-      if (c->getCaptureKind() != LCK_This)
-      {
-        if (c->getCapturedVar() == expr->getDecl())
-        {
-          SourceRange range(expr->getLocStart(), expr->getLocEnd());
-          rewriter_.ReplaceText(range, "__captured_" + c->getCapturedVar()->getDeclName().getAsString());
-        }
-      }
-    }
-
-    return true;
-  }
-
   bool VisitCXXThisExpr(CXXThisExpr* expr)
   {
     for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
@@ -109,12 +92,12 @@ public:
       {
         if (expr->isImplicit())
         {
-          rewriter_.InsertTextBefore(expr->getLocStart(), "__captured_this->");
+          rewriter_.InsertTextBefore(expr->getLocStart(), "__this->");
         }
         else
         {
           SourceRange range(expr->getLocStart(), expr->getLocEnd());
-          rewriter_.ReplaceText(range, "__captured_this");
+          rewriter_.ReplaceText(range, "__this");
         }
       }
     }
@@ -328,7 +311,7 @@ private:
     return false;
   }
 
-  void EmitThisTypedef(std::ostream& os)
+  void EmitCaptureTypedefs(std::ostream& os)
   {
     for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
     {
@@ -337,7 +320,23 @@ private:
         os << "  typedef decltype(this) __resumable_lambda_" << lambda_id_ << "_this_type;\n\n";
         return;
       }
+      else if (c->isInitCapture())
+      {
+        std::string name = c->getCapturedVar()->getDeclName().getAsString();
+        std::string init = rewriter_.ConvertToString(c->getCapturedVar()->getInit());
+        os << "  typedef decltype(" << init << ")";
+        os << " __resumable_lambda_" << lambda_id_ << "_" << name << "_type;\n";
+      }
+      else
+      {
+        std::string name = c->getCapturedVar()->getDeclName().getAsString();
+        os << "  typedef decltype(" << name << ")";
+        os << " __resumable_lambda_" << lambda_id_ << "_" << name << "_type;\n";
+      }
     }
+
+    if (lambda_expr_->capture_begin() != lambda_expr_->capture_end())
+      os << "\n";
   }
 
   void EmitCaptureMembers(std::ostream& os)
@@ -346,24 +345,15 @@ private:
     {
       if (c->getCaptureKind() == LCK_This)
       {
-        os << "    __resumable_lambda_" << lambda_id_ << "_this_type __captured_this;\n";
-      }
-      else if (c->isInitCapture())
-      {
-        std::string name = c->getCapturedVar()->getDeclName().getAsString();
-        std::string init = rewriter_.ConvertToString(c->getCapturedVar()->getInit());
-        os << "    decltype(" << init << ")";
-        if (c->getCaptureKind() == LCK_ByRef)
-          os << "&";
-        os << " __captured_" << name << ";\n";
+        os << "    __resumable_lambda_" << lambda_id_ << "_this_type __this;\n";
       }
       else
       {
         std::string name = c->getCapturedVar()->getDeclName().getAsString();
-        os << "    decltype(" << name << ")";
+        os << "    __resumable_lambda_" << lambda_id_ << "_" << name << "_type";
         if (c->getCaptureKind() == LCK_ByRef)
           os << "&";
-        os << " __captured_" << name << ";\n";
+        os << " " << name << ";\n";
       }
     }
   }
@@ -383,12 +373,12 @@ private:
       {
         std::string name = c->getCapturedVar()->getDeclName().getAsString();
         std::string init = rewriter_.ConvertToString(c->getCapturedVar()->getInit());
-        os << "      decltype(" << init << ")&& __capture_arg_" << name;
+        os << "      __resumable_lambda_" << lambda_id_ << "_" << name << "_type&& __capture_arg_" << name;
       }
       else
       {
         std::string name = c->getCapturedVar()->getDeclName().getAsString();
-        os << "      decltype(" << name << ")& __capture_arg_" << name;
+        os << "      __resumable_lambda_" << lambda_id_ << "_" << name << "_type& __capture_arg_" << name;
       }
     }
     os << ")\n";
@@ -398,12 +388,12 @@ private:
       os << ",\n";
       if (c->getCaptureKind() == LCK_This)
       {
-        os << "      __captured_this(__capture_arg_this)";
+        os << "      __this(__capture_arg_this)";
       }
       else
       {
         std::string name = c->getCapturedVar()->getDeclName().getAsString();
-        os << "      __captured_" << name << "(__capture_arg_" << name << ")";
+        os << "      " << name << "(__capture_arg_" << name << ")";
       }
     }
     os << "\n";
