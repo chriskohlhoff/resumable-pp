@@ -22,6 +22,80 @@ using namespace clang::tooling;
 
 static int next_lambda_id_ = 0;
 
+Expr* IsYieldKeyword(Stmt* stmt)
+{
+  if (ConditionalOperator* op = dyn_cast<ConditionalOperator>(stmt))
+    if (op->getLocStart().isMacroID())
+      if (CXXThrowExpr* true_throw_expr = dyn_cast<CXXThrowExpr>(op->getTrueExpr()))
+        if (CXXConstructExpr* construct_expr = dyn_cast<CXXConstructExpr>(true_throw_expr->getSubExpr()))
+          if (construct_expr->getType().getAsString() == "struct __yield_t")
+            if (CXXThrowExpr* false_throw_expr = dyn_cast<CXXThrowExpr>(op->getFalseExpr()))
+              return false_throw_expr->getSubExpr();
+  return nullptr;
+}
+
+Expr* IsFromKeyword(Stmt* stmt)
+{
+  if (CXXConstructExpr* construct_expr = dyn_cast<CXXConstructExpr>(stmt))
+    if (construct_expr->getNumArgs() == 1)
+      if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(construct_expr->getArg(0)))
+        if (CXXOperatorCallExpr* call_expr = dyn_cast<CXXOperatorCallExpr>(temp->getTemporary()))
+          if (call_expr->getNumArgs() == 2)
+            if (call_expr->getArg(0)->getType().getAsString() == "const struct __from_t")
+              return call_expr->getArg(1);
+  if (ImplicitCastExpr* cast_expr = dyn_cast<ImplicitCastExpr>(stmt))
+    if (CXXMemberCallExpr* call_expr = dyn_cast<CXXMemberCallExpr>(cast_expr->getSubExpr()))
+      if (MemberExpr* member_expr = dyn_cast<MemberExpr>(call_expr->getCallee()))
+        if (ImplicitCastExpr* cast_expr_2 = dyn_cast<ImplicitCastExpr>(member_expr->getBase()))
+          if (CXXOperatorCallExpr* call_expr = dyn_cast<CXXOperatorCallExpr>(cast_expr_2->getSubExpr()))
+            if (call_expr->getNumArgs() == 2)
+              if (call_expr->getArg(0)->getType().getAsString() == "const struct __from_t")
+                return call_expr->getArg(1);
+  return nullptr;
+}
+
+class resumable_lambda_detector : public RecursiveASTVisitor<resumable_lambda_detector>
+{
+public:
+  bool IsResumable(LambdaExpr* expr)
+  {
+    AnnotateAttr* attr = expr->getCallOperator()->getAttr<AnnotateAttr>();
+    if (!attr || attr->getAnnotation() != "resumable")
+      return true;
+
+    is_resumable_ = false;
+    nesting_level_ = 0;
+    TraverseCompoundStmt(expr->getBody());
+    return is_resumable_;
+  }
+
+  bool VisitLambdaExpr(LambdaExpr* expr)
+  {
+    ++nesting_level_;
+    TraverseCompoundStmt(expr->getBody());
+    --nesting_level_;
+    return true;
+  }
+
+  bool VisitConditionalOperator(ConditionalOperator* op)
+  {
+    if (nesting_level_ == 0 && IsYieldKeyword(op))
+      is_resumable_ = true;
+    return true;
+  }
+
+  bool VisitReturnStmt(ReturnStmt* stmt)
+  {
+    if (nesting_level_ == 0 && IsFromKeyword(stmt->getRetValue()))
+      is_resumable_ = true;
+    return true;
+  }
+
+private:
+  bool is_resumable_ = false;
+  int nesting_level_ = 0;
+};
+
 class lambda_visitor : public RecursiveASTVisitor<lambda_visitor>
 {
 public:
@@ -34,8 +108,7 @@ public:
 
   void Go()
   {
-    AnnotateAttr* attr = lambda_expr_->getCallOperator()->getAttr<AnnotateAttr>();
-    if (!attr || attr->getAnnotation() != "resumable")
+    if (!resumable_lambda_detector().IsResumable(lambda_expr_))
       return;
 
     CompoundStmt* body = lambda_expr_->getBody();
@@ -222,38 +295,6 @@ public:
   }
 
 private:
-  Expr* IsYieldKeyword(Stmt* stmt)
-  {
-    if (ConditionalOperator* op = dyn_cast<ConditionalOperator>(stmt))
-      if (op->getLocStart().isMacroID())
-        if (CXXThrowExpr* true_throw_expr = dyn_cast<CXXThrowExpr>(op->getTrueExpr()))
-          if (CXXConstructExpr* construct_expr = dyn_cast<CXXConstructExpr>(true_throw_expr->getSubExpr()))
-            if (construct_expr->getType().getAsString() == "struct __yield_t")
-              if (CXXThrowExpr* false_throw_expr = dyn_cast<CXXThrowExpr>(op->getFalseExpr()))
-                return false_throw_expr->getSubExpr();
-    return nullptr;
-  }
-
-  Expr* IsFromKeyword(Stmt* stmt)
-  {
-    if (CXXConstructExpr* construct_expr = dyn_cast<CXXConstructExpr>(stmt))
-      if (construct_expr->getNumArgs() == 1)
-        if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(construct_expr->getArg(0)))
-          if (CXXOperatorCallExpr* call_expr = dyn_cast<CXXOperatorCallExpr>(temp->getTemporary()))
-            if (call_expr->getNumArgs() == 2)
-              if (call_expr->getArg(0)->getType().getAsString() == "const struct __from_t")
-                return call_expr->getArg(1);
-    if (ImplicitCastExpr* cast_expr = dyn_cast<ImplicitCastExpr>(stmt))
-      if (CXXMemberCallExpr* call_expr = dyn_cast<CXXMemberCallExpr>(cast_expr->getSubExpr()))
-        if (MemberExpr* member_expr = dyn_cast<MemberExpr>(call_expr->getCallee()))
-          if (ImplicitCastExpr* cast_expr_2 = dyn_cast<ImplicitCastExpr>(member_expr->getBase()))
-            if (CXXOperatorCallExpr* call_expr = dyn_cast<CXXOperatorCallExpr>(cast_expr_2->getSubExpr()))
-              if (call_expr->getNumArgs() == 2)
-                if (call_expr->getArg(0)->getType().getAsString() == "const struct __from_t")
-                  return call_expr->getArg(1);
-    return nullptr;
-  }
-
   void EmitCaptureTypedefs(std::ostream& os)
   {
     for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
