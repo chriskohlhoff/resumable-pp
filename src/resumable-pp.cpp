@@ -1,7 +1,8 @@
 #include <iostream>
+#include <list>
 #include <sstream>
-#include <stack>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include "clang/AST/AST.h"
 #include "clang/AST/ASTConsumer.h"
@@ -136,7 +137,8 @@ Expr* IsFromKeyword(Stmt* stmt)
 // - Being explicitly marked "resumable"
 // - Using "yield", "yield from" or "return from" in the body.
 
-class resumable_lambda_detector : public RecursiveASTVisitor<resumable_lambda_detector>
+class resumable_lambda_detector :
+  public RecursiveASTVisitor<resumable_lambda_detector>
 {
 public:
   bool IsResumable(LambdaExpr* expr)
@@ -151,7 +153,7 @@ public:
     return is_resumable_;
   }
 
-  bool VisitLambdaExpr(LambdaExpr* expr)
+  bool TraverseLambdaExpr(LambdaExpr* expr)
   {
     ++nesting_level_;
     TraverseCompoundStmt(expr->getBody());
@@ -179,10 +181,87 @@ private:
 };
 
 //------------------------------------------------------------------------------
+// Class to generate members corresponding to locals.
+
+class resumable_lambda_local_members_codegen :
+  public RecursiveASTVisitor<resumable_lambda_local_members_codegen>
+{
+public:
+  explicit resumable_lambda_local_members_codegen(std::ostream& os)
+    : output_(os),
+      indent_("    ")
+  {
+  }
+
+  void Generate(LambdaExpr* expr)
+  {
+    output_ << indent_ << "union\n";
+    output_ << indent_ << "{\n";
+    indent_ += "  ";
+    next_scope_id_ = 0;
+    mode_ = child_scopes;
+    TraverseCompoundStmt(expr->getBody());
+    indent_.pop_back();
+    indent_.pop_back();
+    output_ << indent_ << "};\n";
+  }
+
+  bool TraverseCompoundStmt(CompoundStmt* stmt)
+  {
+    if (mode_ == child_scopes)
+    {
+      int scope_id = next_scope_id_++;
+      output_ << indent_ << "struct\n";
+      output_ << indent_ << "{\n";
+      indent_ += "  ";
+      mode_ = this_scope;
+      for (CompoundStmt::body_iterator b = stmt->body_begin(), e = stmt->body_end(); b != e; ++b)
+      TraverseStmt(*b);
+      output_ << indent_ << "union\n";
+      output_ << indent_ << "{\n";
+      indent_ += "  ";
+      mode_ = child_scopes;
+      for (CompoundStmt::body_iterator b = stmt->body_begin(), e = stmt->body_end(); b != e; ++b)
+        TraverseStmt(*b);
+      indent_.pop_back();
+      indent_.pop_back();
+      output_ << indent_ << "};\n";
+      indent_.pop_back();
+      indent_.pop_back();
+      output_ << indent_ << "} __scope_" << scope_id << ";\n";
+    }
+
+    return true;
+  }
+
+  bool VisitVarDecl(VarDecl* decl)
+  {
+    if (mode_ == this_scope)
+    {
+      if (decl->hasLocalStorage())
+      {
+        std::string type = decl->getType().getAsString();
+        std::string name = decl->getDeclName().getAsString();
+        output_ << indent_ << type << " " << name << ";\n";
+      }
+    }
+
+    return true;
+  }
+
+private:
+  std::ostream& output_;
+  std::string indent_;
+  int next_scope_id_ = 0;
+  enum { this_scope, child_scopes } mode_ = this_scope;
+};
+
+//------------------------------------------------------------------------------
 // This class is responsible for the main job of generating the code associated
 // with a resumable lambda.
 
-class resumable_lambda_codegen : public RecursiveASTVisitor<resumable_lambda_codegen>
+class resumable_lambda_codegen :
+  public RecursiveASTVisitor<resumable_lambda_codegen>
 {
 public:
   resumable_lambda_codegen(Rewriter& r, LambdaExpr* expr)
@@ -212,8 +291,14 @@ public:
     EmitCaptureMembers(before);
     before << "  };\n";
     before << "\n";
+    before << "  struct __resumable_lambda_" << lambda_id_ << "_locals\n";
+    before << "  {\n";
+    resumable_lambda_local_members_codegen(before).Generate(lambda_expr_);
+    before << "  };\n";
+    before << "\n";
     before << "  struct __resumable_lambda_" << lambda_id_ << " :\n";
-    before << "    __resumable_lambda_" << lambda_id_ << "_capture\n";
+    before << "    __resumable_lambda_" << lambda_id_ << "_capture,\n";
+    before << "    __resumable_lambda_" << lambda_id_ << "_locals\n";
     before << "  {\n";
     before << "    int __state;\n";
     before << "\n";
@@ -377,11 +462,52 @@ public:
 
   bool VisitDeclRefExpr(DeclRefExpr* expr)
   {
-    if (expr->getDecl()->getType().getAsString() == "const struct __lambda_this_t")
+    if (locals_.count(expr->getDecl()))
+    {
+      SourceRange range(expr->getLocStart(), expr->getLocation());
+      rewriter_.ReplaceText(range, locals_[expr->getDecl()]);
+    }
+    else if (expr->getDecl()->getType().getAsString() == "const struct __lambda_this_t")
     {
       auto yield = rewriter_.getSourceMgr().getImmediateExpansionRange(expr->getLocStart());
       SourceRange range(yield.first, yield.second);
       rewriter_.ReplaceText(range, "this");
+    }
+
+    return true;
+  }
+
+  bool TraverseCompoundStmt(CompoundStmt* stmt)
+  {
+    scope_ids_.push_back(next_scope_id_++);
+    for (CompoundStmt::body_iterator b = stmt->body_begin(), e = stmt->body_end(); b != e; ++b)
+      TraverseStmt(*b);
+    scope_ids_.pop_front();
+
+    return true;
+  }
+
+  bool VisitVarDecl(VarDecl* decl)
+  {
+    if (decl->hasLocalStorage())
+    {
+      std::string name;
+      for (int scope: scope_ids_)
+        name += "__scope_" + std::to_string(scope) + ".";
+      name += decl->getDeclName().getAsString();
+
+      locals_.insert(std::make_pair(decl, name));
+
+      if (decl->hasInit())
+      {
+        SourceRange range(decl->getLocStart(), decl->getLocation());
+        rewriter_.ReplaceText(range, name);
+      }
+      else
+      {
+        SourceRange range(decl->getLocStart(), decl->getLocEnd());
+        rewriter_.ReplaceText(range, "(void)0");
+      }
     }
 
     return true;
@@ -586,6 +712,9 @@ private:
   int lambda_id_;
   int next_yield_ = 1;
   static int next_lambda_id_;
+  std::list<int> scope_ids_;
+  int next_scope_id_ = 0;
+  std::unordered_map<Decl*, std::string> locals_;
 };
 
 int resumable_lambda_codegen::next_lambda_id_ = 0;
