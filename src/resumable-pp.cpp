@@ -1,9 +1,10 @@
 #include <iostream>
-#include <list>
+#include <map>
 #include <sstream>
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 #include "clang/AST/AST.h"
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/RecursiveASTVisitor.h"
@@ -181,79 +182,229 @@ private:
 };
 
 //------------------------------------------------------------------------------
-// Class to generate members corresponding to locals.
+// Class to visit the lambda body and build a database of all local members.
 
-class resumable_lambda_local_members_codegen :
-  public RecursiveASTVisitor<resumable_lambda_local_members_codegen>
+class resumable_lambda_locals:
+  public RecursiveASTVisitor<resumable_lambda_locals>
 {
 public:
-  explicit resumable_lambda_local_members_codegen(std::ostream& os)
-    : output_(os),
-      indent_("    ")
+  typedef std::vector<int> scope_path;
+  typedef std::map<scope_path, ValueDecl*>::iterator iterator;
+  typedef std::map<scope_path, ValueDecl*>::reverse_iterator reverse_iterator;
+
+  void Build(LambdaExpr* expr)
   {
+    curr_scope_path_.clear();
+    next_scope_id_ = 0;
+    next_yield_id_ = 1;
+    curr_scope_yield_id_ = 0;
+    TraverseCompoundStmt(expr->getBody());
   }
 
-  void Generate(LambdaExpr* expr)
+  iterator begin()
   {
-    output_ << indent_ << "union\n";
-    output_ << indent_ << "{\n";
-    indent_ += "  ";
-    next_scope_id_ = 0;
-    mode_ = child_scopes;
-    TraverseCompoundStmt(expr->getBody());
-    indent_.pop_back();
-    indent_.pop_back();
-    output_ << indent_ << "};\n";
+    return scope_to_decl_.begin();
+  }
+
+  iterator end()
+  {
+    return scope_to_decl_.end();
+  }
+
+  reverse_iterator rbegin()
+  {
+    return scope_to_decl_.rbegin();
+  }
+
+  reverse_iterator rend()
+  {
+    return scope_to_decl_.rend();
+  }
+
+  std::string getPathAsString(ValueDecl* decl)
+  {
+    auto iter = decl_to_scope_.find(decl);
+    if (iter != decl_to_scope_.end())
+    {
+      std::string s;
+      for (int scope: iter->second)
+        s += "__s" + std::to_string(scope) + ".";
+      s += decl->getDeclName().getAsString();
+      return s;
+    }
+    return std::string();
+  }
+
+  int getYieldId(ValueDecl* decl)
+  {
+    auto iter = ptr_to_yield_.find(decl);
+    return iter != ptr_to_yield_.end() ? iter->second : -1;
+  }
+
+  int getYieldId(Stmt* stmt)
+  {
+    auto iter = ptr_to_yield_.find(stmt);
+    return iter != ptr_to_yield_.end() ? iter->second : -1;
+  }
+
+  int getLastYieldId()
+  {
+    return next_yield_id_ - 1;
+  }
+
+  int getPriorYieldId(int yield_id)
+  {
+    auto iter = yield_to_prior_yield_.find(yield_id);
+    return iter != yield_to_prior_yield_.end() ? iter->second : 0;
   }
 
   bool TraverseCompoundStmt(CompoundStmt* stmt)
   {
-    if (mode_ == child_scopes)
-    {
-      int scope_id = next_scope_id_++;
-      output_ << indent_ << "struct\n";
-      output_ << indent_ << "{\n";
-      indent_ += "  ";
-      mode_ = this_scope;
-      for (CompoundStmt::body_iterator b = stmt->body_begin(), e = stmt->body_end(); b != e; ++b)
+    int curr_scope_id = next_scope_id_;
+    curr_scope_path_.push_back(curr_scope_id);
+    next_scope_id_ = 0;
+    int enclosing_scope_yield_id = curr_scope_yield_id_;
+
+    for (CompoundStmt::body_iterator b = stmt->body_begin(), e = stmt->body_end(); b != e; ++b)
       TraverseStmt(*b);
-      output_ << indent_ << "union\n";
-      output_ << indent_ << "{\n";
-      indent_ += "  ";
-      mode_ = child_scopes;
-      for (CompoundStmt::body_iterator b = stmt->body_begin(), e = stmt->body_end(); b != e; ++b)
-        TraverseStmt(*b);
-      indent_.pop_back();
-      indent_.pop_back();
-      output_ << indent_ << "};\n";
-      indent_.pop_back();
-      indent_.pop_back();
-      output_ << indent_ << "} __scope_" << scope_id << ";\n";
-    }
+
+    curr_scope_yield_id_ = enclosing_scope_yield_id;
+    curr_scope_path_.pop_back();
+    next_scope_id_ = curr_scope_id + 1;
+
+    return true;
+  }
+
+  bool TraverseForStmt(ForStmt* stmt)
+  {
+    int curr_scope_id = next_scope_id_;
+    curr_scope_path_.push_back(curr_scope_id);
+    next_scope_id_ = 0;
+    int enclosing_scope_yield_id = curr_scope_yield_id_;
+
+    if (stmt->getInit())
+      TraverseStmt(stmt->getInit());
+
+    curr_scope_path_.push_back(next_scope_id_);
+    next_scope_id_ = 0;
+
+    TraverseStmt(stmt->getBody());
+
+    curr_scope_yield_id_ = enclosing_scope_yield_id;
+    curr_scope_path_.pop_back();
+    curr_scope_path_.pop_back();
+    next_scope_id_ = curr_scope_id + 1;
+
+    return true;
+  }
+
+  bool TraverseWhileStmt(WhileStmt* stmt)
+  {
+    int curr_scope_id = next_scope_id_;
+    curr_scope_path_.push_back(curr_scope_id);
+    next_scope_id_ = 0;
+    int enclosing_scope_yield_id = curr_scope_yield_id_;
+
+    if (stmt->getCond())
+      TraverseStmt(stmt->getCond());
+
+    curr_scope_path_.push_back(next_scope_id_);
+    next_scope_id_ = 0;
+
+    TraverseStmt(stmt->getBody());
+
+    curr_scope_yield_id_ = enclosing_scope_yield_id;
+    curr_scope_path_.pop_back();
+    curr_scope_path_.pop_back();
+    next_scope_id_ = curr_scope_id + 1;
+
+    return true;
+  }
+
+  bool TraverseIfStmt(IfStmt* stmt)
+  {
+    int curr_scope_id = next_scope_id_;
+    curr_scope_path_.push_back(curr_scope_id);
+    next_scope_id_ = 0;
+    int enclosing_scope_yield_id = curr_scope_yield_id_;
+
+    if (stmt->getCond())
+      TraverseStmt(stmt->getCond());
+
+    curr_scope_path_.push_back(0);
+    next_scope_id_ = 0;
+    int enclosing_scope_yield_id_2 = curr_scope_yield_id_;
+
+    TraverseStmt(stmt->getThen());
+
+    ++curr_scope_path_.back();
+    next_scope_id_ = 0;
+    curr_scope_yield_id_ = enclosing_scope_yield_id_2;
+
+    TraverseStmt(stmt->getElse());
+
+    curr_scope_yield_id_ = enclosing_scope_yield_id;
+    curr_scope_path_.pop_back();
+    curr_scope_path_.pop_back();
+    next_scope_id_ = curr_scope_id + 1;
 
     return true;
   }
 
   bool VisitVarDecl(VarDecl* decl)
   {
-    if (mode_ == this_scope)
+    if (decl->hasLocalStorage())
     {
-      if (decl->hasLocalStorage())
+      scope_to_decl_.insert(std::make_pair(curr_scope_path_, decl));
+      decl_to_scope_.insert(std::make_pair(decl, curr_scope_path_));
+
+      if (decl->hasInit() && CXXConstructExpr::classof(decl->getInit()))
       {
-        std::string type = decl->getType().getAsString();
-        std::string name = decl->getDeclName().getAsString();
-        output_ << indent_ << type << " " << name << ";\n";
+        int yield_id = next_yield_id_++;
+        ptr_to_yield_[decl] = yield_id;
+        yield_to_prior_yield_[yield_id] = curr_scope_yield_id_;
+        curr_scope_yield_id_ = yield_id;
       }
     }
 
     return true;
   }
 
+  bool VisitConditionalOperator(ConditionalOperator* op)
+  {
+    if (IsYieldKeyword(op))
+    {
+      int yield_id = next_yield_id_++;
+      ptr_to_yield_[op] = yield_id;
+      yield_to_prior_yield_[yield_id] = curr_scope_yield_id_;
+      curr_scope_yield_id_ = yield_id;
+    }
+
+    return true;
+  }
+
+  bool VisitReturnStmt(ReturnStmt* stmt)
+  {
+    if (IsFromKeyword(stmt->getRetValue()))
+    {
+      int yield_id = next_yield_id_++;
+      ptr_to_yield_[stmt] = yield_id;
+      yield_to_prior_yield_[yield_id] = curr_scope_yield_id_;
+      curr_scope_yield_id_ = yield_id;
+    }
+
+    return true;
+  }
+
 private:
-  std::ostream& output_;
-  std::string indent_;
-  int next_scope_id_ = 0;
-  enum { this_scope, child_scopes } mode_ = this_scope;
+  scope_path curr_scope_path_;
+  int next_scope_id_;
+  int next_yield_id_;
+  int curr_scope_yield_id_;
+  std::multimap<scope_path, ValueDecl*> scope_to_decl_;
+  std::unordered_map<ValueDecl*, scope_path> decl_to_scope_;
+  std::unordered_map<void*, int> ptr_to_yield_;
+  std::unordered_map<int, int> yield_to_prior_yield_;
 };
 
 //------------------------------------------------------------------------------
@@ -276,6 +427,7 @@ public:
     if (!resumable_lambda_detector().IsResumable(lambda_expr_))
       return;
 
+    locals_.Build(lambda_expr_);
     CompoundStmt* body = lambda_expr_->getBody();
     SourceRange beforeBody(lambda_expr_->getLocStart(), body->getLocStart());
     SourceRange afterBody(body->getLocEnd(), lambda_expr_->getLocEnd());
@@ -293,15 +445,17 @@ public:
     before << "\n";
     before << "  struct __resumable_lambda_" << lambda_id_ << "_locals\n";
     before << "  {\n";
-    resumable_lambda_local_members_codegen(before).Generate(lambda_expr_);
+    EmitLocalsConstructor(before);
+    before << "\n";
+    EmitLocalsDestructor(before);
+    before << "\n";
+    EmitLocalsMembers(before);
     before << "  };\n";
     before << "\n";
     before << "  struct __resumable_lambda_" << lambda_id_ << " :\n";
     before << "    __resumable_lambda_" << lambda_id_ << "_capture,\n";
     before << "    __resumable_lambda_" << lambda_id_ << "_locals\n";
     before << "  {\n";
-    before << "    int __state;\n";
-    before << "\n";
     EmitConstructor(before);
     before << "\n";
     before << "    bool is_initial() const noexcept { return __state == 0; }\n";
@@ -370,7 +524,7 @@ public:
         auto end = Lexer::findLocationAfterToken(op->getLocEnd(), tok::semi, rewriter_.getSourceMgr(), rewriter_.getLangOpts(), true);
         SourceRange range(yield.first, from.second);
 
-        int yield_point = next_yield_++;
+        int yield_point = locals_.getYieldId(op);
 
         std::stringstream before;
         before << "\n";
@@ -400,7 +554,7 @@ public:
         auto end = Lexer::findLocationAfterToken(op->getLocEnd(), tok::semi, rewriter_.getSourceMgr(), rewriter_.getLangOpts(), true);
         SourceRange range(yield.first, yield.second);
 
-        int yield_point = next_yield_++;
+        int yield_point = locals_.getYieldId(op);
 
         std::stringstream before;
         before << "\n";
@@ -432,7 +586,7 @@ public:
       auto end = Lexer::findLocationAfterToken(stmt->getLocEnd(), tok::semi, rewriter_.getSourceMgr(), rewriter_.getLangOpts(), true);
       SourceRange range(stmt->getLocStart(), from.second);
 
-      int yield_point = next_yield_++;
+      int yield_point = locals_.getYieldId(stmt);
 
       std::stringstream before;
       before << "\n";
@@ -462,10 +616,11 @@ public:
 
   bool VisitDeclRefExpr(DeclRefExpr* expr)
   {
-    if (locals_.count(expr->getDecl()))
+    std::string var = locals_.getPathAsString(expr->getDecl());
+    if (!var.empty())
     {
       SourceRange range(expr->getLocStart(), expr->getLocation());
-      rewriter_.ReplaceText(range, locals_[expr->getDecl()]);
+      rewriter_.ReplaceText(range, var);
     }
     else if (expr->getDecl()->getType().getAsString() == "const struct __lambda_this_t")
     {
@@ -477,31 +632,27 @@ public:
     return true;
   }
 
-  bool TraverseCompoundStmt(CompoundStmt* stmt)
-  {
-    scope_ids_.push_back(next_scope_id_++);
-    for (CompoundStmt::body_iterator b = stmt->body_begin(), e = stmt->body_end(); b != e; ++b)
-      TraverseStmt(*b);
-    scope_ids_.pop_front();
-
-    return true;
-  }
-
   bool VisitVarDecl(VarDecl* decl)
   {
     if (decl->hasLocalStorage())
     {
-      std::string name;
-      for (int scope: scope_ids_)
-        name += "__scope_" + std::to_string(scope) + ".";
-      name += decl->getDeclName().getAsString();
-
-      locals_.insert(std::make_pair(decl, name));
+      std::string name = locals_.getPathAsString(decl);
 
       if (decl->hasInit())
       {
-        SourceRange range(decl->getLocStart(), decl->getLocation());
-        rewriter_.ReplaceText(range, name);
+        if (CXXConstructExpr* construct_expr = dyn_cast<CXXConstructExpr>(decl->getInit()))
+        {
+          std::string init = "new (static_cast<void*>(&" + name + ")) " + decl->getType().getAsString() + "()";
+          int yield_point = locals_.getYieldId(decl);
+          std::string state_change = ", __state = " + std::to_string(yield_point);
+          SourceRange range(decl->getLocStart(), decl->getLocEnd());
+          rewriter_.ReplaceText(range, init + state_change);
+        }
+        else
+        {
+          SourceRange range(decl->getLocStart(), decl->getLocation());
+          rewriter_.ReplaceText(range, name);
+        }
       }
       else
       {
@@ -609,6 +760,97 @@ private:
     }
   }
 
+  void EmitLocalsConstructor(std::ostream& os)
+  {
+    os << "    __resumable_lambda_" << lambda_id_ << "_locals()\n";
+    os << "      : __state(0)\n";
+    os << "    {\n";
+    os << "    }\n";
+    os << "\n";
+    os << "    __resumable_lambda_" << lambda_id_ << "_locals(const __resumable_lambda_" << lambda_id_ << "_locals& __other)\n";
+    os << "      : __state(__other.__state)\n";
+    os << "    {\n";
+    os << "    }\n";
+    os << "\n";
+    os << "    __resumable_lambda_" << lambda_id_ << "_locals(__resumable_lambda_" << lambda_id_ << "_locals&& __other)\n";
+    os << "      : __state(__other.__state)\n";
+    os << "    {\n";
+    os << "    }\n";
+  }
+
+  void EmitLocalsDestructor(std::ostream& os)
+  {
+    int yield_id = locals_.getLastYieldId();
+
+    os << "    ~__resumable_lambda_" << lambda_id_ << "_locals()\n";
+    os << "    {\n";
+    os << "      switch (__state)\n";
+    os << "      {\n";
+    for (resumable_lambda_locals::reverse_iterator v = locals_.rbegin(), e = locals_.rend(); v != e; ++v)
+    {
+      int current_yield_id = locals_.getYieldId(v->second);
+      if (current_yield_id > 0)
+      {
+        for (; yield_id >= current_yield_id; --yield_id)
+          os << "      case " << yield_id << ": __state" << yield_id << ":\n";
+
+        std::string type = v->second->getType().getAsString();
+        std::string name = locals_.getPathAsString(v->second);
+        os << "        {\n";
+        os << "          typedef " << type << " __type;\n";
+        os << "          " << name << ".~__type();\n";
+        os << "          goto __state" << locals_.getPriorYieldId(current_yield_id) << ";\n";
+        os << "        }\n";
+      }
+    }
+    os << "      case 0: __state0: default:\n";
+    os << "        break;\n";
+    os << "      }\n";
+    os << "    }\n";
+  }
+
+  void EmitLocalsMembers(std::ostream& os)
+  {
+    resumable_lambda_locals::scope_path curr_path;
+    std::string indent = "      ";
+
+    os << "    int __state;\n";
+    os << "    union\n";
+    os << "    {\n";
+    for (resumable_lambda_locals::iterator v = locals_.begin(), e = locals_.end(); v != e; ++v)
+    {
+      while (curr_path.size() > v->first.size())
+      {
+        indent.pop_back(), indent.pop_back();
+        os << indent << "} __s" << curr_path.back() << ";\n";
+        curr_path.pop_back();
+      }
+      while (curr_path.size() > 0 && curr_path.back() != v->first[curr_path.size()])
+      {
+        indent.pop_back(), indent.pop_back();
+        os << indent << "} __s" << curr_path.back() << ";\n";
+        curr_path.pop_back();
+      }
+      for (bool first = true; curr_path.size() < v->first.size(); first = false)
+      {
+        os << indent << "struct\n";
+        os << indent << "{\n";
+        indent += "  ";
+        curr_path.push_back(v->first[curr_path.size()]);
+      }
+      std::string type = v->second->getType().getAsString();
+      std::string name = v->second->getDeclName().getAsString();
+      os << indent << type << " " << name << ";\n";
+    }
+    while (curr_path.size() > 0)
+    {
+      indent.pop_back(), indent.pop_back();
+      os << indent << "} __s" << curr_path.back() << ";\n";
+      curr_path.pop_back();
+    }
+    os << "    };\n";
+  }
+
   void EmitConstructor(std::ostream& os)
   {
     os << "    explicit __resumable_lambda_" << lambda_id_ << "(int /*dummy*/";
@@ -654,8 +896,7 @@ private:
         os << "          __capture_arg_" << name;
       }
     }
-    os << "),\n";
-    os << "      __state(0)\n";
+    os << ")\n";
     os << "    {\n";
     os << "    }\n";
   }
@@ -710,11 +951,8 @@ private:
   Rewriter& rewriter_;
   LambdaExpr* lambda_expr_;
   int lambda_id_;
-  int next_yield_ = 1;
   static int next_lambda_id_;
-  std::list<int> scope_ids_;
-  int next_scope_id_ = 0;
-  std::unordered_map<Decl*, std::string> locals_;
+  resumable_lambda_locals locals_;
 };
 
 int resumable_lambda_codegen::next_lambda_id_ = 0;
@@ -790,8 +1028,9 @@ public:
   {
     llvm::errs() << "** Creating AST consumer for: " << file << "\n";
     rewriter_.setSourceMgr(compiler.getSourceManager(), compiler.getLangOpts());
-    std::string line = std::string("#line 1 \"") + file.data() + "\"\n";
-    rewriter_.InsertText(rewriter_.getSourceMgr().getLocForStartOfFile(rewriter_.getSourceMgr().getMainFileID()), line);
+    std::string preamble = "#include <new>\n";
+    preamble += std::string("#line 1 \"") + file.data() + "\"\n";
+    rewriter_.InsertText(rewriter_.getSourceMgr().getLocForStartOfFile(rewriter_.getSourceMgr().getMainFileID()), preamble);
     return new consumer(rewriter_);
   }
 
