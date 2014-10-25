@@ -360,12 +360,15 @@ public:
       scope_to_decl_.insert(std::make_pair(curr_scope_path_, decl));
       decl_to_scope_.insert(std::make_pair(decl, curr_scope_path_));
 
-      if (decl->hasInit() && CXXConstructExpr::classof(decl->getInit()))
+      if (decl->hasInit())
       {
-        int yield_id = next_yield_id_++;
-        ptr_to_yield_[decl] = yield_id;
-        yield_to_prior_yield_[yield_id] = curr_scope_yield_id_;
-        curr_scope_yield_id_ = yield_id;
+        if (CXXConstructExpr::classof(decl->getInit()) || ExprWithCleanups::classof(decl->getInit()))
+        {
+          int yield_id = next_yield_id_++;
+          ptr_to_yield_[decl] = yield_id;
+          yield_to_prior_yield_[yield_id] = curr_scope_yield_id_;
+          curr_scope_yield_id_ = yield_id;
+        }
       }
     }
 
@@ -598,7 +601,6 @@ public:
         // "yield"
 
         auto yield = rewriter_.getSourceMgr().getImmediateExpansionRange(op->getLocStart());
-        //auto end = Lexer::findLocationAfterToken(op->getLocEnd(), tok::semi, rewriter_.getSourceMgr(), rewriter_.getLangOpts(), true);
         auto end = Lexer::getLocForEndOfToken(op->getLocEnd(), 0, rewriter_.getSourceMgr(), rewriter_.getLangOpts());
         SourceRange range(yield.first, yield.second);
 
@@ -692,11 +694,27 @@ public:
       {
         if (CXXConstructExpr* construct_expr = dyn_cast<CXXConstructExpr>(decl->getInit()))
         {
-          std::string init = "new (static_cast<void*>(&" + name + ")) " + decl->getType().getAsString() + "()";
+          std::string init = "new (static_cast<void*>(&" + name + ")) " + decl->getType().getAsString();
           int yield_point = locals_.getYieldId(decl);
           std::string state_change = ", __state = " + std::to_string(yield_point);
-          SourceRange range(decl->getLocStart(), decl->getLocEnd());
-          rewriter_.ReplaceText(range, init + state_change);
+          SourceRange range(decl->getLocStart(), construct_expr->getLocStart());
+          rewriter_.ReplaceText(range, init);
+          rewriter_.InsertTextAfterToken(decl->getLocEnd(), state_change);
+        }
+        else if (ExprWithCleanups* expr = dyn_cast<ExprWithCleanups>(decl->getInit()))
+        {
+          if (CXXConstructExpr* construct_expr = dyn_cast<CXXConstructExpr>(expr->getSubExpr()))
+          {
+            if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(construct_expr->getArg(0)))
+            {
+              std::string init = "new (static_cast<void*>(&" + name + ")) " + decl->getType().getAsString() + "(";
+              int yield_point = locals_.getYieldId(decl);
+              std::string state_change = "), __state = " + std::to_string(yield_point);
+              SourceRange range(decl->getLocStart(), temp->getLocStart().getLocWithOffset(-1));
+              rewriter_.ReplaceText(range, init);
+              rewriter_.InsertTextAfterToken(decl->getLocEnd(), state_change);
+            }
+          }
         }
         else
         {
