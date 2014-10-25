@@ -264,6 +264,7 @@ public:
     curr_scope_path_.push_back(curr_scope_id);
     next_scope_id_ = 0;
     int enclosing_scope_yield_id = curr_scope_yield_id_;
+    ptr_to_yield_[stmt] = enclosing_scope_yield_id;
 
     for (CompoundStmt::body_iterator b = stmt->body_begin(), e = stmt->body_end(); b != e; ++b)
       TraverseStmt(*b);
@@ -281,6 +282,7 @@ public:
     curr_scope_path_.push_back(curr_scope_id);
     next_scope_id_ = 0;
     int enclosing_scope_yield_id = curr_scope_yield_id_;
+    ptr_to_yield_[stmt] = enclosing_scope_yield_id;
 
     if (stmt->getInit())
       TraverseStmt(stmt->getInit());
@@ -452,6 +454,17 @@ public:
     EmitLocalsMembers(before);
     before << "  };\n";
     before << "\n";
+    before << "  struct __resumable_lambda_" << lambda_id_ << "_term_check\n";
+    before << "  {\n";
+    before << "    __resumable_lambda_" << lambda_id_ << "_locals* __locals;\n";
+    before << "\n";
+    before << "    ~__resumable_lambda_" << lambda_id_ << "_term_check()\n";
+    before << "    {\n";
+    before << "      if (__locals)\n";
+    before << "        __locals->__unwind_to(-1);\n";
+    before << "    }\n";
+    before << "  };\n";
+    before << "\n";
     before << "  struct __resumable_lambda_" << lambda_id_ << " :\n";
     before << "    __resumable_lambda_" << lambda_id_ << "_capture,\n";
     before << "    __resumable_lambda_" << lambda_id_ << "_locals\n";
@@ -463,12 +476,7 @@ public:
     before << "\n";
     EmitCallOperatorDecl(before);
     before << "    {\n";
-    before << "      struct __term_check\n";
-    before << "      {\n";
-    before << "        int* __state;\n";
-    before << "        ~__term_check() { if (__state) *__state = -1; }\n";
-    before << "      } __term = { &__state };\n";
-    before << "\n";
+    before << "      __resumable_lambda_" << lambda_id_ << "_term_check __term = { this };\n";
     before << "      switch (__state)\n";
     before << "      case 0:\n";
     before << "      {\n";
@@ -479,6 +487,7 @@ public:
 
     std::stringstream after;
     after << "\n";
+    after << "      __unwind_to(-1);\n";
     after << "      default: (void)0;\n";
     after << "      }\n";
     after << "    }\n";
@@ -488,6 +497,44 @@ public:
     EmitLineNumber(after, body->getLocEnd());
     after << "/*END RESUMABLE LAMBDA DEFINITION*/";
     rewriter_.ReplaceText(afterBody, after.str());
+  }
+
+  bool TraverseCompoundStmt(CompoundStmt* stmt)
+  {
+    if (stmt != lambda_expr_->getBody())
+    {
+      rewriter_.InsertTextBefore(stmt->getLocStart(), "{");
+    }
+
+    bool result = RecursiveASTVisitor<resumable_lambda_codegen>::TraverseCompoundStmt(stmt);
+
+    if (stmt != lambda_expr_->getBody())
+    {
+      std::string unwind = "__unwind_to(" + std::to_string(locals_.getYieldId(stmt)) + ");}";
+      auto end = Lexer::getLocForEndOfToken(stmt->getLocEnd(), 0, rewriter_.getSourceMgr(), rewriter_.getLangOpts());
+      rewriter_.InsertTextAfter(end, unwind);
+    }
+
+    return result;
+  }
+
+  bool TraverseForStmt(ForStmt* stmt)
+  {
+    if (stmt->getInit())
+    {
+      rewriter_.InsertTextBefore(stmt->getLocStart(), "{");
+    }
+
+    bool result = RecursiveASTVisitor<resumable_lambda_codegen>::TraverseForStmt(stmt);
+
+    if (stmt->getInit())
+    {
+      std::string unwind = "__unwind_to(" + std::to_string(locals_.getYieldId(stmt)) + ");}";
+      auto end = Lexer::getLocForEndOfToken(stmt->getBody()->getLocEnd(), 0, rewriter_.getSourceMgr(), rewriter_.getLangOpts());
+      rewriter_.InsertTextAfterToken(end, unwind);
+    }
+
+    return result;
   }
 
   bool VisitCXXThisExpr(CXXThisExpr* expr)
@@ -538,7 +585,7 @@ public:
         std::stringstream after;
         after << "            if (__g.is_terminal()) break;\n";
         after << "            __state = " << yield_point << ";\n";
-        after << "            __term.__state = 0;\n";
+        after << "            __term.__locals = nullptr;\n";
         after << "            return __g();\n";
         after << "          }\n";
         after << "        case " << yield_point << ":\n";
@@ -551,25 +598,28 @@ public:
         // "yield"
 
         auto yield = rewriter_.getSourceMgr().getImmediateExpansionRange(op->getLocStart());
-        auto end = Lexer::findLocationAfterToken(op->getLocEnd(), tok::semi, rewriter_.getSourceMgr(), rewriter_.getLangOpts(), true);
+        //auto end = Lexer::findLocationAfterToken(op->getLocEnd(), tok::semi, rewriter_.getSourceMgr(), rewriter_.getLangOpts(), true);
+        auto end = Lexer::getLocForEndOfToken(op->getLocEnd(), 0, rewriter_.getSourceMgr(), rewriter_.getLangOpts());
         SourceRange range(yield.first, yield.second);
 
         int yield_point = locals_.getYieldId(op);
 
         std::stringstream before;
         before << "\n";
+        before << "        do\n";
         before << "        {\n";
         before << "          __state = " << yield_point << ";\n";
-        before << "          __term.__state = 0;\n";
+        before << "          __term.__locals = nullptr;\n";
         before << "          return\n";
         EmitLineNumber(before, after_yield->getLocStart());
         rewriter_.ReplaceText(range, before.str());
 
         std::stringstream after;
+        after << ";\n";
         after << "        case " << yield_point << ":\n";
         after << "          (void)0;\n";
-        after << "        }\n";
-        rewriter_.InsertTextAfter(end, after.str());
+        after << "        } while (false)";
+        rewriter_.InsertTextBefore(end, after.str());
       }
     }
 
@@ -599,7 +649,7 @@ public:
 
       std::stringstream after;
       after << "            __state = " << yield_point << ";\n";
-      after << "            __term.__state = 0;\n";
+      after << "            __term.__locals = nullptr;\n";
       after << "            auto __ret(__g());\n";
       after << "            if (__g.is_terminal())\n";
       after << "              __state = -1;\n";
@@ -784,27 +834,37 @@ private:
 
     os << "    ~__resumable_lambda_" << lambda_id_ << "_locals()\n";
     os << "    {\n";
-    os << "      switch (__state)\n";
+    os << "      __unwind_to(-1);\n";
+    os << "    }\n";
+    os << "\n";
+    os << "    void __unwind_to(int __new_state)\n";
+    os << "    {\n";
+    os << "      while (__state > __new_state)\n";
     os << "      {\n";
+    os << "        switch (__state)\n";
+    os << "        {\n";
     for (resumable_lambda_locals::reverse_iterator v = locals_.rbegin(), e = locals_.rend(); v != e; ++v)
     {
       int current_yield_id = locals_.getYieldId(v->second);
       if (current_yield_id > 0)
       {
         for (; yield_id >= current_yield_id; --yield_id)
-          os << "      case " << yield_id << ": __state" << yield_id << ":\n";
+          os << "        case " << yield_id << ":\n";
 
         std::string type = v->second->getType().getAsString();
         std::string name = locals_.getPathAsString(v->second);
-        os << "        {\n";
-        os << "          typedef " << type << " __type;\n";
-        os << "          " << name << ".~__type();\n";
-        os << "          goto __state" << locals_.getPriorYieldId(current_yield_id) << ";\n";
-        os << "        }\n";
+        os << "          {\n";
+        os << "            typedef " << type << " __type;\n";
+        os << "            " << name << ".~__type();\n";
+        os << "            __state = " << locals_.getPriorYieldId(current_yield_id) << ";\n";
+        os << "            break;\n";
+        os << "          }\n";
       }
     }
-    os << "      case 0: __state0: default:\n";
-    os << "        break;\n";
+    os << "        case 0: default:\n";
+    os << "          __state = -1;\n";
+    os << "          break;\n";
+    os << "        }\n";
     os << "      }\n";
     os << "    }\n";
   }
