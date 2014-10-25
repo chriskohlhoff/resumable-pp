@@ -471,6 +471,8 @@ public:
     before << "\n";
     EmitLocalsCopyConstructor(before);
     before << "\n";
+    EmitLocalsMoveConstructor(before);
+    before << "\n";
     EmitLocalsDestructor(before);
     before << "\n";
     EmitLocalsMembers(before);
@@ -842,12 +844,6 @@ private:
     os << "      : __state(0)\n";
     os << "    {\n";
     os << "    }\n";
-    os << "\n";
-    os << "\n";
-    os << "    __resumable_lambda_" << lambda_id_ << "_locals(__resumable_lambda_" << lambda_id_ << "_locals&& __other)\n";
-    os << "      : __state(__other.__state)\n";
-    os << "    {\n";
-    os << "    }\n";
   }
 
   void EmitLocalsCopyConstructor(std::ostream& os)
@@ -878,6 +874,37 @@ private:
     os << "    }\n";
     os << "\n";
     os << "    __resumable_lambda_" << lambda_id_ << "_locals& operator=(const __resumable_lambda_" << lambda_id_ << "_locals&) = delete;\n";
+  }
+
+  void EmitLocalsMoveConstructor(std::ostream& os)
+  {
+    os << "    __resumable_lambda_" << lambda_id_ << "_locals(__resumable_lambda_" << lambda_id_ << "_locals&& __other)\n";
+    os << "    {\n";
+    os << "      __unwinder __unwind = { this };\n";
+    os << "      __unwinder __unwind_other = { &__other };\n";
+    for (resumable_lambda_locals::iterator v = locals_.begin(), e = locals_.end(); v != e; ++v)
+    {
+      std::string type = v->second->getType().getAsString();
+      std::string name = locals_.getPathAsString(v->second);
+      int yield_id = locals_.getYieldId(v->second);
+
+      os << "      switch (__other.__state)\n";
+      os << "      {\n";
+      for (int i = 0; i <= locals_.getLastYieldId(); ++i)
+        if (yield_id == i || locals_.isReachable(yield_id, i))
+          os << "      case " << i << ":\n";
+      os << "        new (static_cast<void*>(&" + name + ")) " + type + "(static_cast<" + type + "&&>(__other." + name + "));\n";
+      os << "        __state = " << locals_.getYieldId(v->second) << ";\n";
+      os << "        break;\n";
+      os << "      default:\n";
+      os << "        break;\n";
+      os << "      }\n";
+    }
+    os << "      __state = __other.__state;\n";
+    os << "      __unwind.__locals = nullptr;\n";
+    os << "    }\n";
+    os << "\n";
+    os << "    __resumable_lambda_" << lambda_id_ << "_locals& operator=(__resumable_lambda_" << lambda_id_ << "_locals&&) = delete;\n";
   }
 
   void EmitLocalsDestructor(std::ostream& os)
