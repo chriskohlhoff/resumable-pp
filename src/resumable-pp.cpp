@@ -1,5 +1,6 @@
 #include <iostream>
 #include <map>
+#include <set>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -258,6 +259,11 @@ public:
     return iter != yield_to_prior_yield_.end() ? iter->second : 0;
   }
 
+  bool isReachable(int from_yield_id, int to_yield_id)
+  {
+    return is_reachable_yield_.count(std::make_pair(from_yield_id, to_yield_id)) > 0;
+  }
+
   bool TraverseCompoundStmt(CompoundStmt* stmt)
   {
     int curr_scope_id = next_scope_id_;
@@ -363,12 +369,7 @@ public:
       if (decl->hasInit())
       {
         if (CXXConstructExpr::classof(decl->getInit()) || ExprWithCleanups::classof(decl->getInit()))
-        {
-          int yield_id = next_yield_id_++;
-          ptr_to_yield_[decl] = yield_id;
-          yield_to_prior_yield_[yield_id] = curr_scope_yield_id_;
-          curr_scope_yield_id_ = yield_id;
-        }
+          AddYieldPoint(decl);
       }
     }
 
@@ -378,12 +379,7 @@ public:
   bool VisitConditionalOperator(ConditionalOperator* op)
   {
     if (IsYieldKeyword(op))
-    {
-      int yield_id = next_yield_id_++;
-      ptr_to_yield_[op] = yield_id;
-      yield_to_prior_yield_[yield_id] = curr_scope_yield_id_;
-      curr_scope_yield_id_ = yield_id;
-    }
+      AddYieldPoint(op);
 
     return true;
   }
@@ -391,17 +387,26 @@ public:
   bool VisitReturnStmt(ReturnStmt* stmt)
   {
     if (IsFromKeyword(stmt->getRetValue()))
-    {
-      int yield_id = next_yield_id_++;
-      ptr_to_yield_[stmt] = yield_id;
-      yield_to_prior_yield_[yield_id] = curr_scope_yield_id_;
-      curr_scope_yield_id_ = yield_id;
-    }
+      AddYieldPoint(stmt);
 
     return true;
   }
 
 private:
+  void AddYieldPoint(void* ptr)
+  {
+    int yield_id = next_yield_id_++;
+    int prior_yield_id = curr_scope_yield_id_;
+    ptr_to_yield_[ptr] = yield_id;
+    yield_to_prior_yield_[yield_id] = prior_yield_id;
+    curr_scope_yield_id_ = yield_id;
+    while (prior_yield_id > 0)
+    {
+      is_reachable_yield_.insert(std::make_pair(prior_yield_id, yield_id));
+      prior_yield_id = getPriorYieldId(prior_yield_id);
+    }
+  }
+
   scope_path curr_scope_path_;
   int next_scope_id_;
   int next_yield_id_;
@@ -410,6 +415,7 @@ private:
   std::unordered_map<ValueDecl*, scope_path> decl_to_scope_;
   std::unordered_map<void*, int> ptr_to_yield_;
   std::unordered_map<int, int> yield_to_prior_yield_;
+  std::set<std::pair<int, int>> is_reachable_yield_;
 };
 
 //------------------------------------------------------------------------------
@@ -450,22 +456,24 @@ public:
     before << "\n";
     before << "  struct __resumable_lambda_" << lambda_id_ << "_locals\n";
     before << "  {\n";
+    before << "    struct __unwinder\n";
+    before << "    {\n";
+    before << "      __resumable_lambda_" << lambda_id_ << "_locals* __locals;\n";
+    before << "\n";
+    before << "      ~__unwinder()\n";
+    before << "      {\n";
+    before << "        if (__locals)\n";
+    before << "          __locals->__unwind_to(-1);\n";
+    before << "      }\n";
+    before << "    };\n";
+    before << "\n";
     EmitLocalsConstructor(before);
+    before << "\n";
+    EmitLocalsCopyConstructor(before);
     before << "\n";
     EmitLocalsDestructor(before);
     before << "\n";
     EmitLocalsMembers(before);
-    before << "  };\n";
-    before << "\n";
-    before << "  struct __resumable_lambda_" << lambda_id_ << "_term_check\n";
-    before << "  {\n";
-    before << "    __resumable_lambda_" << lambda_id_ << "_locals* __locals;\n";
-    before << "\n";
-    before << "    ~__resumable_lambda_" << lambda_id_ << "_term_check()\n";
-    before << "    {\n";
-    before << "      if (__locals)\n";
-    before << "        __locals->__unwind_to(-1);\n";
-    before << "    }\n";
     before << "  };\n";
     before << "\n";
     before << "  struct __resumable_lambda_" << lambda_id_ << " :\n";
@@ -479,7 +487,7 @@ public:
     before << "\n";
     EmitCallOperatorDecl(before);
     before << "    {\n";
-    before << "      __resumable_lambda_" << lambda_id_ << "_term_check __term = { this };\n";
+    before << "      __resumable_lambda_" << lambda_id_ << "_locals::__unwinder __unwind = { this };\n";
     before << "      switch (__state)\n";
     before << "      case 0:\n";
     before << "      {\n";
@@ -588,7 +596,7 @@ public:
         std::stringstream after;
         after << "            if (__g.is_terminal()) break;\n";
         after << "            __state = " << yield_point << ";\n";
-        after << "            __term.__locals = nullptr;\n";
+        after << "            __unwind.__locals = nullptr;\n";
         after << "            return __g();\n";
         after << "          }\n";
         after << "        case " << yield_point << ":\n";
@@ -611,7 +619,7 @@ public:
         before << "        do\n";
         before << "        {\n";
         before << "          __state = " << yield_point << ";\n";
-        before << "          __term.__locals = nullptr;\n";
+        before << "          __unwind.__locals = nullptr;\n";
         before << "          return\n";
         EmitLineNumber(before, after_yield->getLocStart());
         rewriter_.ReplaceText(range, before.str());
@@ -651,7 +659,7 @@ public:
 
       std::stringstream after;
       after << "            __state = " << yield_point << ";\n";
-      after << "            __term.__locals = nullptr;\n";
+      after << "            __unwind.__locals = nullptr;\n";
       after << "            auto __ret(__g());\n";
       after << "            if (__g.is_terminal())\n";
       after << "              __state = -1;\n";
@@ -835,15 +843,41 @@ private:
     os << "    {\n";
     os << "    }\n";
     os << "\n";
-    os << "    __resumable_lambda_" << lambda_id_ << "_locals(const __resumable_lambda_" << lambda_id_ << "_locals& __other)\n";
-    os << "      : __state(__other.__state)\n";
-    os << "    {\n";
-    os << "    }\n";
     os << "\n";
     os << "    __resumable_lambda_" << lambda_id_ << "_locals(__resumable_lambda_" << lambda_id_ << "_locals&& __other)\n";
     os << "      : __state(__other.__state)\n";
     os << "    {\n";
     os << "    }\n";
+  }
+
+  void EmitLocalsCopyConstructor(std::ostream& os)
+  {
+    os << "    __resumable_lambda_" << lambda_id_ << "_locals(const __resumable_lambda_" << lambda_id_ << "_locals& __other)\n";
+    os << "    {\n";
+    os << "      __unwinder __unwind = { this };\n";
+    for (resumable_lambda_locals::iterator v = locals_.begin(), e = locals_.end(); v != e; ++v)
+    {
+      std::string type = v->second->getType().getAsString();
+      std::string name = locals_.getPathAsString(v->second);
+      int yield_id = locals_.getYieldId(v->second);
+
+      os << "      switch (__other.__state)\n";
+      os << "      {\n";
+      for (int i = 0; i <= locals_.getLastYieldId(); ++i)
+        if (yield_id == i || locals_.isReachable(yield_id, i))
+          os << "      case " << i << ":\n";
+      os << "        new (static_cast<void*>(&" + name + ")) " + type + "(__other." + name + ");\n";
+      os << "        __state = " << locals_.getYieldId(v->second) << ";\n";
+      os << "        break;\n";
+      os << "      default:\n";
+      os << "        break;\n";
+      os << "      }\n";
+    }
+    os << "      __state = __other.__state;\n";
+    os << "      __unwind.__locals = nullptr;\n";
+    os << "    }\n";
+    os << "\n";
+    os << "    __resumable_lambda_" << lambda_id_ << "_locals& operator=(const __resumable_lambda_" << lambda_id_ << "_locals&) = delete;\n";
   }
 
   void EmitLocalsDestructor(std::ostream& os)
@@ -903,7 +937,7 @@ private:
         os << indent << "} __s" << curr_path.back() << ";\n";
         curr_path.pop_back();
       }
-      while (curr_path.size() > 0 && curr_path.back() != v->first[curr_path.size()])
+      while (curr_path.size() > 0 && curr_path.back() != v->first[curr_path.size() - 1])
       {
         indent.pop_back(), indent.pop_back();
         os << indent << "} __s" << curr_path.back() << ";\n";
