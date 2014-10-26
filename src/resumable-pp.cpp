@@ -454,19 +454,34 @@ public:
     EmitCaptureMembers(before);
     before << "  };\n";
     before << "\n";
-    before << "  struct __resumable_lambda_" << lambda_id_ << "_locals\n";
+    before << "  struct __resumable_lambda_" << lambda_id_ << "_locals_data\n";
     before << "  {\n";
-    before << "    struct __unwinder\n";
+    before << "    __resumable_lambda_" << lambda_id_ << "_locals_data() {}\n";
+    before << "    __resumable_lambda_" << lambda_id_ << "_locals_data(const __resumable_lambda_" << lambda_id_ << "_locals_data&) = delete;\n";
+    before << "    __resumable_lambda_" << lambda_id_ << "_locals_data(__resumable_lambda_" << lambda_id_ << "_locals_data&&) = delete;\n";
+    before << "    __resumable_lambda_" << lambda_id_ << "_locals_data& operator=(__resumable_lambda_" << lambda_id_ << "_locals_data&&) = delete;\n";
+    before << "    __resumable_lambda_" << lambda_id_ << "_locals_data& operator=(const __resumable_lambda_" << lambda_id_ << "_locals_data&) = delete;\n";
+    before << "    ~__resumable_lambda_" << lambda_id_ << "_locals_data() {}\n";
+    before << "\n";
+    EmitLocalsDataMembers(before);
+    before << "\n";
+    EmitLocalsDataUnwindTo(before);
+    before << "  };\n";
+    before << "\n";
+    before << "  struct __resumable_lambda_" << lambda_id_ << "_locals_unwinder\n";
+    before << "  {\n";
+    before << "    __resumable_lambda_" << lambda_id_ << "_locals_data* __locals;\n";
+    before << "\n";
+    before << "    ~__resumable_lambda_" << lambda_id_ << "_locals_unwinder()\n";
     before << "    {\n";
-    before << "      __resumable_lambda_" << lambda_id_ << "_locals* __locals;\n";
+    before << "      if (__locals)\n";
+    before << "        __locals->__unwind_to(-1);\n";
+    before << "    }\n";
+    before << "  };\n";
     before << "\n";
-    before << "      ~__unwinder()\n";
-    before << "      {\n";
-    before << "        if (__locals)\n";
-    before << "          __locals->__unwind_to(-1);\n";
-    before << "      }\n";
-    before << "    };\n";
-    before << "\n";
+    before << "  struct __resumable_lambda_" << lambda_id_ << "_locals :\n";
+    before << "    __resumable_lambda_" << lambda_id_ << "_locals_data\n";
+    before << "  {\n";
     EmitLocalsConstructor(before);
     before << "\n";
     EmitLocalsCopyConstructor(before);
@@ -474,8 +489,6 @@ public:
     EmitLocalsMoveConstructor(before);
     before << "\n";
     EmitLocalsDestructor(before);
-    before << "\n";
-    EmitLocalsMembers(before);
     before << "  };\n";
     before << "\n";
     before << "  struct __resumable_lambda_" << lambda_id_ << " :\n";
@@ -489,7 +502,7 @@ public:
     before << "\n";
     EmitCallOperatorDecl(before);
     before << "    {\n";
-    before << "      __resumable_lambda_" << lambda_id_ << "_locals::__unwinder __unwind = { this };\n";
+    before << "      __resumable_lambda_" << lambda_id_ << "_locals_unwinder __unwind = { this };\n";
     before << "      switch (__state)\n";
     before << "      case 0:\n";
     before << "      {\n";
@@ -838,117 +851,7 @@ private:
     }
   }
 
-  void EmitLocalsConstructor(std::ostream& os)
-  {
-    os << "    __resumable_lambda_" << lambda_id_ << "_locals()\n";
-    os << "      : __state(0)\n";
-    os << "    {\n";
-    os << "    }\n";
-  }
-
-  void EmitLocalsCopyConstructor(std::ostream& os)
-  {
-    os << "    __resumable_lambda_" << lambda_id_ << "_locals(const __resumable_lambda_" << lambda_id_ << "_locals& __other)\n";
-    os << "    {\n";
-    os << "      __unwinder __unwind = { this };\n";
-    for (resumable_lambda_locals::iterator v = locals_.begin(), e = locals_.end(); v != e; ++v)
-    {
-      std::string type = v->second->getType().getAsString();
-      std::string name = locals_.getPathAsString(v->second);
-      int yield_id = locals_.getYieldId(v->second);
-
-      os << "      switch (__other.__state)\n";
-      os << "      {\n";
-      for (int i = 0; i <= locals_.getLastYieldId(); ++i)
-        if (yield_id == i || locals_.isReachable(yield_id, i))
-          os << "      case " << i << ":\n";
-      os << "        new (static_cast<void*>(&" + name + ")) " + type + "(__other." + name + ");\n";
-      os << "        __state = " << locals_.getYieldId(v->second) << ";\n";
-      os << "        break;\n";
-      os << "      default:\n";
-      os << "        break;\n";
-      os << "      }\n";
-    }
-    os << "      __state = __other.__state;\n";
-    os << "      __unwind.__locals = nullptr;\n";
-    os << "    }\n";
-    os << "\n";
-    os << "    __resumable_lambda_" << lambda_id_ << "_locals& operator=(const __resumable_lambda_" << lambda_id_ << "_locals&) = delete;\n";
-  }
-
-  void EmitLocalsMoveConstructor(std::ostream& os)
-  {
-    os << "    __resumable_lambda_" << lambda_id_ << "_locals(__resumable_lambda_" << lambda_id_ << "_locals&& __other)\n";
-    os << "    {\n";
-    os << "      __unwinder __unwind = { this };\n";
-    os << "      __unwinder __unwind_other = { &__other };\n";
-    for (resumable_lambda_locals::iterator v = locals_.begin(), e = locals_.end(); v != e; ++v)
-    {
-      std::string type = v->second->getType().getAsString();
-      std::string name = locals_.getPathAsString(v->second);
-      int yield_id = locals_.getYieldId(v->second);
-
-      os << "      switch (__other.__state)\n";
-      os << "      {\n";
-      for (int i = 0; i <= locals_.getLastYieldId(); ++i)
-        if (yield_id == i || locals_.isReachable(yield_id, i))
-          os << "      case " << i << ":\n";
-      os << "        new (static_cast<void*>(&" + name + ")) " + type + "(static_cast<" + type + "&&>(__other." + name + "));\n";
-      os << "        __state = " << locals_.getYieldId(v->second) << ";\n";
-      os << "        break;\n";
-      os << "      default:\n";
-      os << "        break;\n";
-      os << "      }\n";
-    }
-    os << "      __state = __other.__state;\n";
-    os << "      __unwind.__locals = nullptr;\n";
-    os << "    }\n";
-    os << "\n";
-    os << "    __resumable_lambda_" << lambda_id_ << "_locals& operator=(__resumable_lambda_" << lambda_id_ << "_locals&&) = delete;\n";
-  }
-
-  void EmitLocalsDestructor(std::ostream& os)
-  {
-    int yield_id = locals_.getLastYieldId();
-
-    os << "    ~__resumable_lambda_" << lambda_id_ << "_locals()\n";
-    os << "    {\n";
-    os << "      __unwind_to(-1);\n";
-    os << "    }\n";
-    os << "\n";
-    os << "    void __unwind_to(int __new_state)\n";
-    os << "    {\n";
-    os << "      while (__state > __new_state)\n";
-    os << "      {\n";
-    os << "        switch (__state)\n";
-    os << "        {\n";
-    for (resumable_lambda_locals::reverse_iterator v = locals_.rbegin(), e = locals_.rend(); v != e; ++v)
-    {
-      int current_yield_id = locals_.getYieldId(v->second);
-      if (current_yield_id > 0)
-      {
-        for (; yield_id >= current_yield_id; --yield_id)
-          os << "        case " << yield_id << ":\n";
-
-        std::string type = v->second->getType().getAsString();
-        std::string name = locals_.getPathAsString(v->second);
-        os << "          {\n";
-        os << "            typedef " << type << " __type;\n";
-        os << "            " << name << ".~__type();\n";
-        os << "            __state = " << locals_.getPriorYieldId(current_yield_id) << ";\n";
-        os << "            break;\n";
-        os << "          }\n";
-      }
-    }
-    os << "        case 0: default:\n";
-    os << "          __state = -1;\n";
-    os << "          break;\n";
-    os << "        }\n";
-    os << "      }\n";
-    os << "    }\n";
-  }
-
-  void EmitLocalsMembers(std::ostream& os)
+  void EmitLocalsDataMembers(std::ostream& os)
   {
     resumable_lambda_locals::scope_path curr_path;
     std::string indent = "      ";
@@ -988,6 +891,139 @@ private:
       curr_path.pop_back();
     }
     os << "    };\n";
+  }
+
+  void EmitLocalsDataUnwindTo(std::ostream& os)
+  {
+    int yield_id = locals_.getLastYieldId();
+
+    os << "    void __unwind_to(int __new_state)\n";
+    os << "    {\n";
+    os << "      while (__state > __new_state)\n";
+    os << "      {\n";
+    os << "        switch (__state)\n";
+    os << "        {\n";
+    for (resumable_lambda_locals::reverse_iterator v = locals_.rbegin(), e = locals_.rend(); v != e; ++v)
+    {
+      int current_yield_id = locals_.getYieldId(v->second);
+      if (current_yield_id > 0)
+      {
+        for (; yield_id >= current_yield_id; --yield_id)
+          os << "        case " << yield_id << ":\n";
+
+        std::string type = v->second->getType().getAsString();
+        std::string name = locals_.getPathAsString(v->second);
+        os << "          {\n";
+        os << "            typedef " << type << " __type;\n";
+        os << "            " << name << ".~__type();\n";
+        os << "            __state = " << locals_.getPriorYieldId(current_yield_id) << ";\n";
+        os << "            break;\n";
+        os << "          }\n";
+      }
+    }
+    os << "        case 0: default:\n";
+    os << "          __state = -1;\n";
+    os << "          break;\n";
+    os << "        }\n";
+    os << "      }\n";
+    os << "    }\n";
+  }
+
+  void EmitLocalsConstructor(std::ostream& os)
+  {
+    os << "    __resumable_lambda_" << lambda_id_ << "_locals()\n";
+    os << "    {\n";
+    os << "      __state = 0;\n";
+    os << "    }\n";
+  }
+
+  void EmitLocalsCopyConstructor(std::ostream& os)
+  {
+    os << "    enum { __is_copy_constructible_v =\n";
+    for (resumable_lambda_locals::iterator v = locals_.begin(), e = locals_.end(); v != e; ++v)
+      os << "      ::std::is_copy_constructible<" << v->second->getType().getAsString() << ">::value &&\n";
+    os << "      true };\n";
+    os << "\n";
+    os << "    typedef ::std::integral_constant<bool, __is_copy_constructible_v> __is_copy_constructible;\n";
+    os << "\n";
+    os << "    typedef typename ::std::conditional<__is_copy_constructible_v,\n";
+    os << "        __resumable_lambda_" << lambda_id_ << "_locals,\n";
+    os << "        __resumable_copy_disabled<__resumable_lambda_" << lambda_id_ << "_locals_data>\n";
+    os << "      >::type __copy_constructor_arg;\n";
+    os << "\n";
+    os << "    __resumable_lambda_" << lambda_id_ << "_locals(const __copy_constructor_arg& __other)\n";
+    os << "    {\n";
+    os << "      __resumable_lambda_" << lambda_id_ << "_locals_unwinder __unwind = { this };\n";
+    for (resumable_lambda_locals::iterator v = locals_.begin(), e = locals_.end(); v != e; ++v)
+    {
+      std::string type = v->second->getType().getAsString();
+      std::string name = locals_.getPathAsString(v->second);
+      int yield_id = locals_.getYieldId(v->second);
+
+      os << "      switch (__other.__state)\n";
+      os << "      {\n";
+      for (int i = 0; i <= locals_.getLastYieldId(); ++i)
+        if (yield_id == i || locals_.isReachable(yield_id, i))
+          os << "      case " << i << ":\n";
+      os << "        __resumable_local_new(__is_copy_constructible(), &" + name + ", __other." + name + ");\n";
+      os << "        __state = " << locals_.getYieldId(v->second) << ";\n";
+      os << "        break;\n";
+      os << "      default:\n";
+      os << "        break;\n";
+      os << "      }\n";
+    }
+    os << "      __state = __other.__state;\n";
+    os << "      __unwind.__locals = nullptr;\n";
+    os << "    }\n";
+  }
+
+  void EmitLocalsMoveConstructor(std::ostream& os)
+  {
+    os << "    enum { __is_move_constructible_v =\n";
+    for (resumable_lambda_locals::iterator v = locals_.begin(), e = locals_.end(); v != e; ++v)
+      os << "      ::std::is_move_constructible<" << v->second->getType().getAsString() << ">::value &&\n";
+    os << "      true };\n";
+    os << "\n";
+    os << "    typedef ::std::integral_constant<bool, __is_move_constructible_v> __is_move_constructible;\n";
+    os << "\n";
+    os << "    typedef typename ::std::conditional<__is_move_constructible_v,\n";
+    os << "        __resumable_lambda_" << lambda_id_ << "_locals,\n";
+    os << "        __resumable_move_disabled<__resumable_lambda_" << lambda_id_ << "_locals_data>\n";
+    os << "      >::type __move_constructor_arg;\n";
+    os << "\n";
+    os << "    __resumable_lambda_" << lambda_id_ << "_locals(__move_constructor_arg&& __other)\n";
+    os << "    {\n";
+    os << "      __resumable_lambda_" << lambda_id_ << "_locals_unwinder __unwind = { this };\n";
+    os << "      __resumable_lambda_" << lambda_id_ << "_locals_unwinder __unwind_other = { &__other };\n";
+    for (resumable_lambda_locals::iterator v = locals_.begin(), e = locals_.end(); v != e; ++v)
+    {
+      std::string type = v->second->getType().getAsString();
+      std::string name = locals_.getPathAsString(v->second);
+      int yield_id = locals_.getYieldId(v->second);
+
+      os << "      switch (__other.__state)\n";
+      os << "      {\n";
+      for (int i = 0; i <= locals_.getLastYieldId(); ++i)
+        if (yield_id == i || locals_.isReachable(yield_id, i))
+          os << "      case " << i << ":\n";
+      os << "        __resumable_local_new(__is_move_constructible(), &" + name + ", static_cast<" + type + "&&>(__other." + name + "));\n";
+      os << "        __state = " << locals_.getYieldId(v->second) << ";\n";
+      os << "        break;\n";
+      os << "      default:\n";
+      os << "        break;\n";
+      os << "      }\n";
+    }
+    os << "      __state = __other.__state;\n";
+    os << "      __unwind.__locals = nullptr;\n";
+    os << "    }\n";
+  }
+
+  void EmitLocalsDestructor(std::ostream& os)
+  {
+    os << "    ~__resumable_lambda_" << lambda_id_ << "_locals()\n";
+    os << "    {\n";
+    os << "      __unwind_to(-1);\n";
+    os << "    }\n";
   }
 
   void EmitConstructor(std::ostream& os)
@@ -1168,6 +1204,24 @@ public:
     llvm::errs() << "** Creating AST consumer for: " << file << "\n";
     rewriter_.setSourceMgr(compiler.getSourceManager(), compiler.getLangOpts());
     std::string preamble = "#include <new>\n";
+    preamble += "#include <type_traits>\n";
+    preamble += "\n";
+    preamble += "template <class _T>\n";
+    preamble += "struct __resumable_copy_disabled : _T {};\n";
+    preamble += "\n";
+    preamble += "template <class _T>\n";
+    preamble += "struct __resumable_move_disabled : _T {};\n";
+    preamble += "\n";
+    preamble += "template <class _T, class... _Args>\n";
+    preamble += "void __resumable_local_new(::std::true_type, _T* __p, _Args&&... __args)\n";
+    preamble += "{\n";
+    preamble += "  new (static_cast<void*>(__p)) _T(static_cast<_Args&&>(__args)...);\n";
+    preamble += "}\n";
+    preamble += "\n";
+    preamble += "template <class _T, class... _Args>\n";
+    preamble += "void __resumable_local_new(::std::false_type, _T*, _Args&&...)\n";
+    preamble += "{\n";
+    preamble += "}\n";
     preamble += std::string("#line 1 \"") + file.data() + "\"\n";
     rewriter_.InsertText(rewriter_.getSourceMgr().getLocForStartOfFile(rewriter_.getSourceMgr().getMainFileID()), preamble);
     return new consumer(rewriter_);
