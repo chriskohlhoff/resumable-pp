@@ -195,7 +195,6 @@ class resumable_lambda_locals:
 public:
   typedef std::vector<int> scope_path;
   typedef std::map<scope_path, ValueDecl*>::iterator iterator;
-  typedef std::map<scope_path, ValueDecl*>::reverse_iterator reverse_iterator;
 
   void Build(LambdaExpr* expr)
   {
@@ -216,16 +215,6 @@ public:
     return scope_to_decl_.end();
   }
 
-  reverse_iterator rbegin()
-  {
-    return scope_to_decl_.rbegin();
-  }
-
-  reverse_iterator rend()
-  {
-    return scope_to_decl_.rend();
-  }
-
   std::string getPathAsString(ValueDecl* decl)
   {
     auto iter = decl_to_scope_.find(decl);
@@ -238,6 +227,12 @@ public:
       return s;
     }
     return std::string();
+  }
+
+  ValueDecl* getDecl(int yield_id)
+  {
+    auto iter = yield_to_decl_.find(yield_id);
+    return iter != yield_to_decl_.end() ? iter->second : nullptr;
   }
 
   int getYieldId(ValueDecl* decl)
@@ -373,7 +368,10 @@ public:
       if (decl->hasInit())
       {
         if (CXXConstructExpr::classof(decl->getInit()) || ExprWithCleanups::classof(decl->getInit()))
-          AddYieldPoint(decl);
+        {
+          int yield_id = AddYieldPoint(decl);
+          yield_to_decl_[yield_id] = decl;
+        }
       }
     }
 
@@ -397,7 +395,7 @@ public:
   }
 
 private:
-  void AddYieldPoint(void* ptr)
+  int AddYieldPoint(void* ptr)
   {
     int yield_id = next_yield_id_++;
     int prior_yield_id = curr_scope_yield_id_;
@@ -409,6 +407,7 @@ private:
       is_reachable_yield_.insert(std::make_pair(prior_yield_id, yield_id));
       prior_yield_id = getPriorYieldId(prior_yield_id);
     }
+    return yield_id;
   }
 
   scope_path curr_scope_path_;
@@ -418,6 +417,7 @@ private:
   std::multimap<scope_path, ValueDecl*> scope_to_decl_;
   std::unordered_map<ValueDecl*, scope_path> decl_to_scope_;
   std::unordered_map<void*, int> ptr_to_yield_;
+  std::unordered_map<int, ValueDecl*> yield_to_decl_;
   std::unordered_map<int, int> yield_to_prior_yield_;
   std::set<std::pair<int, int>> is_reachable_yield_;
 };
@@ -899,30 +899,30 @@ private:
 
   void EmitLocalsDataUnwindTo(std::ostream& os)
   {
-    int yield_id = locals_.getLastYieldId();
-
     os << "    void __unwind_to(int __new_state)\n";
     os << "    {\n";
     os << "      while (__state > __new_state)\n";
     os << "      {\n";
     os << "        switch (__state)\n";
     os << "        {\n";
-    for (resumable_lambda_locals::reverse_iterator v = locals_.rbegin(), e = locals_.rend(); v != e; ++v)
+    for (int yield_id = locals_.getLastYieldId(); yield_id > 0; --yield_id)
     {
-      int current_yield_id = locals_.getYieldId(v->second);
-      if (current_yield_id > 0)
+      int prior_yield_id = locals_.getPriorYieldId(yield_id);
+      os << "        case " << yield_id << ":\n";
+      if (ValueDecl* decl = locals_.getDecl(yield_id))
       {
-        for (; yield_id >= current_yield_id; --yield_id)
-          os << "        case " << yield_id << ":\n";
-
-        std::string type = v->second->getType().getAsString();
-        std::string name = locals_.getPathAsString(v->second);
+        std::string type = decl->getType().getAsString();
+        std::string name = locals_.getPathAsString(decl);
         os << "          {\n";
         os << "            typedef " << type << " __type;\n";
         os << "            " << name << ".~__type();\n";
-        os << "            __state = " << locals_.getPriorYieldId(current_yield_id) << ";\n";
-        os << "            break;\n";
+        os << "            __state = " << prior_yield_id << ";\n";
         os << "          }\n";
+      }
+      if (prior_yield_id != yield_id - 1)
+      {
+        os << "          __state = " << prior_yield_id << ";\n";
+        os << "          break;\n";
       }
     }
     os << "        case 0: default:\n";
