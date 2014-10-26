@@ -150,7 +150,7 @@ public:
   bool IsResumable(LambdaExpr* expr)
   {
     AnnotateAttr* attr = expr->getCallOperator()->getAttr<AnnotateAttr>();
-    if (!attr || attr->getAnnotation() != "resumable")
+    if (attr && attr->getAnnotation() == "resumable")
       return true;
 
     is_resumable_ = false;
