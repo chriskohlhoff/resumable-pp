@@ -1203,7 +1203,10 @@ public:
   {
     llvm::errs() << "** Creating AST consumer for: " << file << "\n";
     rewriter_.setSourceMgr(compiler.getSourceManager(), compiler.getLangOpts());
-    std::string preamble = "#include <new>\n";
+    std::string preamble = "#ifndef __RESUMABLE_PREAMBLE\n";
+    preamble += "#define __RESUMABLE_PREAMBLE\n";
+    preamble += "\n";
+    preamble += "#include <new>\n";
     preamble += "#include <type_traits>\n";
     preamble += "\n";
     preamble += "template <class _T>\n";
@@ -1213,15 +1216,18 @@ public:
     preamble += "struct __resumable_move_disabled : _T {};\n";
     preamble += "\n";
     preamble += "template <class _T, class... _Args>\n";
-    preamble += "void __resumable_local_new(::std::true_type, _T* __p, _Args&&... __args)\n";
+    preamble += "inline void __resumable_local_new(::std::true_type, _T* __p, _Args&&... __args)\n";
     preamble += "{\n";
     preamble += "  new (static_cast<void*>(__p)) _T(static_cast<_Args&&>(__args)...);\n";
     preamble += "}\n";
     preamble += "\n";
     preamble += "template <class _T, class... _Args>\n";
-    preamble += "void __resumable_local_new(::std::false_type, _T*, _Args&&...)\n";
+    preamble += "inline void __resumable_local_new(::std::false_type, _T*, _Args&&...)\n";
     preamble += "{\n";
     preamble += "}\n";
+    preamble += "\n";
+    preamble += "#endif // __RESUMABLE_PREAMBLE\n";
+    preamble += "\n";
     preamble += std::string("#line 1 \"") + file.data() + "\"\n";
     rewriter_.InsertText(rewriter_.getSourceMgr().getLocForStartOfFile(rewriter_.getSourceMgr().getMainFileID()), preamble);
     return new consumer(rewriter_);
