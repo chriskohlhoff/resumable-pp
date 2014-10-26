@@ -64,6 +64,21 @@ public:
   {
     return impl_ ? impl_->is_terminal() : true;
   }
+
+  const std::type_info& wanted_type() const noexcept
+  {
+    return impl_ ? impl_->wanted_type() : typeid(void);
+  }
+
+  void* wanted() noexcept
+  {
+    return impl_ ? impl_->wanted() : nullptr;
+  }
+
+  const void* wanted() const noexcept
+  {
+    return impl_ ? impl_->wanted() : nullptr;
+  }
   
 private:
   struct impl_base
@@ -72,6 +87,9 @@ private:
     virtual impl_base* clone() const = 0;
     virtual T invoke() = 0;
     virtual bool is_terminal() const = 0;
+    virtual const std::type_info& wanted_type() const noexcept = 0;
+    virtual void* wanted() noexcept = 0;
+    virtual const void* wanted() const noexcept = 0;
   };
 
   template <class G>
@@ -81,6 +99,9 @@ private:
     virtual impl_base* clone() const { return new impl(g_); }
     virtual T invoke() { return g_(); }
     virtual bool is_terminal() const { return g_.is_terminal(); }
+    virtual const std::type_info& wanted_type() const noexcept { return g_.wanted_type(); }
+    virtual void* wanted() noexcept { return g_.wanted(); }
+    virtual const void* wanted() const noexcept { return g_.wanted(); }
     G g_;
   };
 

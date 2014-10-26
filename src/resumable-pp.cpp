@@ -279,6 +279,12 @@ public:
     return iter != yield_to_prior_yield_.end() ? iter->second : 0;
   }
 
+  std::string getSubGenerator(int yield_id)
+  {
+    auto iter = yield_to_subgen_.find(yield_id);
+    return iter != yield_to_subgen_.end() ? iter->second : "";
+  }
+
   bool isReachable(int from_yield_id, int to_yield_id)
   {
     return is_reachable_yield_.count(std::make_pair(from_yield_id, to_yield_id)) > 0;
@@ -446,8 +452,14 @@ public:
         if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(after_from))
         {
           AddTemporary(op, temp);
-          return result;
         }
+        else
+        {
+          int yield_id = AddYieldPoint(op);
+          yield_to_subgen_[yield_id] = rewriter_.getRewrittenText(SourceRange(after_from->getLocStart(), after_from->getLocEnd().getLocWithOffset(1)));
+        }
+
+        return result;
       }
 
       AddYieldPoint(op);
@@ -462,14 +474,15 @@ public:
 
     if (Expr* after_from = IsFromKeyword(stmt->getRetValue()))
     {
-      std::cerr << "after_from is " << std::hex << (std::uintptr_t)after_from << "\n";
       if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(after_from))
       {
         AddTemporary(stmt, temp);
+
         return result;
       }
 
-      AddYieldPoint(stmt);
+      int yield_id = AddYieldPoint(stmt);
+      yield_to_subgen_[yield_id] = rewriter_.getRewrittenText(SourceRange(after_from->getLocStart(), after_from->getLocEnd().getLocWithOffset(1)));
     }
 
     return result;
@@ -536,7 +549,8 @@ private:
     SourceRange range(temp->getLocStart(), temp->getLocEnd());
     rewriter_.ReplaceText(range, full_name);
 
-    AddYieldPoint(parent);
+    int yield_id = AddYieldPoint(parent);
+    yield_to_subgen_[yield_id] = full_name;
 
     curr_scope_yield_id_ = enclosing_scope_yield_id;
     curr_scope_path_.pop_back();
@@ -554,6 +568,7 @@ private:
   std::unordered_map<int, iterator> yield_to_iter_;
   std::unordered_map<int, int> yield_to_prior_yield_;
   std::set<std::pair<int, int>> is_reachable_yield_;
+  std::unordered_map<int, std::string> yield_to_subgen_;
 };
 
 //------------------------------------------------------------------------------
@@ -651,6 +666,10 @@ public:
     before << "\n";
     before << "    bool is_initial() const noexcept { return __state == 0; }\n";
     before << "    bool is_terminal() const noexcept { return __state == -1; }\n";
+    before << "\n";
+    EmitWantedType(before);
+    before << "\n";
+    EmitWanted(before);
     before << "\n";
     EmitCallOperatorDecl(before);
     before << "    {\n";
@@ -1215,6 +1234,66 @@ private:
     os << ")\n";
   }
 
+  void EmitWantedType(std::ostream& os)
+  {
+    os << "    const std::type_info& wanted_type() const noexcept\n";
+    os << "    {\n";
+    os << "      switch (__state)\n";
+    os << "      {\n";
+    for (int yield_id = 0; yield_id <= locals_.getLastYieldId(); ++yield_id)
+    {
+      std::string subgen = locals_.getSubGenerator(yield_id);
+      if (!subgen.empty())
+      {
+        os << "      case " << yield_id << ":\n";
+        os << "        return (" + subgen + ").wanted_type();\n";
+      }
+    }
+    os << "      default:\n";
+    os << "        return typeid(void);\n";
+    os << "      }\n";
+    os << "    }\n";
+  }
+
+  void EmitWanted(std::ostream& os)
+  {
+    os << "    void* wanted() noexcept\n";
+    os << "    {\n";
+    os << "      switch (__state)\n";
+    os << "      {\n";
+    for (int yield_id = 0; yield_id <= locals_.getLastYieldId(); ++yield_id)
+    {
+      std::string subgen = locals_.getSubGenerator(yield_id);
+      if (!subgen.empty())
+      {
+        os << "      case " << yield_id << ":\n";
+        os << "        return (" + subgen + ").wanted();\n";
+      }
+    }
+    os << "      default:\n";
+    os << "        return nullptr;\n";
+    os << "      }\n";
+    os << "    }\n";
+    os << "\n";
+    os << "    const void* wanted() const noexcept\n";
+    os << "    {\n";
+    os << "      switch (__state)\n";
+    os << "      {\n";
+    for (int yield_id = 0; yield_id <= locals_.getLastYieldId(); ++yield_id)
+    {
+      std::string subgen = locals_.getSubGenerator(yield_id);
+      if (!subgen.empty())
+      {
+        os << "      case " << yield_id << ":\n";
+        os << "        return (" + subgen + ").wanted();\n";
+      }
+    }
+    os << "      default:\n";
+    os << "        return nullptr;\n";
+    os << "      }\n";
+    os << "    }\n";
+  }
+
   void EmitFactory(std::ostream& os)
   {
     os << "  struct __resumable_lambda_" << lambda_id_ << "_factory\n";
@@ -1386,6 +1465,7 @@ public:
     preamble += "#define __RESUMABLE_PREAMBLE\n";
     preamble += "\n";
     preamble += "#include <new>\n";
+    preamble += "#include <typeinfo>\n";
     preamble += "#include <type_traits>\n";
     preamble += "\n";
     preamble += "#ifdef __GNUC__\n";
