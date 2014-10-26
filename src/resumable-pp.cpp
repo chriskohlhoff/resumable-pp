@@ -522,8 +522,9 @@ public:
     after << "      }\n";
     after << "    }\n";
     after << "  };\n";
-    EmitReturn(after);
-    after << "}()\n\n";
+    after << "\n";
+    EmitFactory(after);
+    after << "}()()\n\n";
     EmitLineNumber(after, body->getLocEnd());
     after << "/*END RESUMABLE LAMBDA DEFINITION*/";
     rewriter_.ReplaceText(afterBody, after.str());
@@ -790,7 +791,7 @@ private:
 
   void EmitCaptureConstructor(std::ostream& os)
   {
-    os << "    explicit __resumable_lambda_" << lambda_id_ << "_capture(int /*dummy*/";
+    os << "    explicit __resumable_lambda_" << lambda_id_ << "_capture(__resumable_dummy_arg";
     for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
     {
       os << ",\n";
@@ -1032,7 +1033,7 @@ private:
 
   void EmitConstructor(std::ostream& os)
   {
-    os << "    explicit __resumable_lambda_" << lambda_id_ << "(int /*dummy*/";
+    os << "    __resumable_lambda_" << lambda_id_ << "(__resumable_dummy_arg";
     for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
     {
       os << ",\n";
@@ -1058,7 +1059,7 @@ private:
       }
     }
     os << ") :\n";
-    os << "      __resumable_lambda_" << lambda_id_ << "_capture(0 /*dummy*/";
+    os << "      __resumable_lambda_" << lambda_id_ << "_capture(__resumable_dummy_arg()";
     for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
     {
       os << ",\n";
@@ -1098,21 +1099,23 @@ private:
     os << ")\n";
   }
 
-  void EmitReturn(std::ostream& os)
+  void EmitFactory(std::ostream& os)
   {
-    os << "  return __resumable_lambda_" << lambda_id_ << "(0 /*dummy*/";
+    os << "  return [&]() -> __resumable_lambda_" << lambda_id_ << "\n";
+    os << "  {\n";
+    os << "    return { __resumable_dummy_arg()";
     for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
     {
-      os << ",\n";
+      os << ", ";
       if (c->getCaptureKind() == LCK_This)
-        os << "    this";
+        os << "this";
       else if (c->isInitCapture())
-        os << "    " << rewriter_.ConvertToString(c->getCapturedVar()->getInit());
+        os << rewriter_.ConvertToString(c->getCapturedVar()->getInit());
       else
-        os << "    " << c->getCapturedVar()->getDeclName().getAsString();
+        os << c->getCapturedVar()->getDeclName().getAsString();
     }
-    os << "\n";
-    os << "  );\n";
+    os << " };\n";
+    os << "  };\n";
   }
 
   void EmitLineNumber(std::ostream& os, SourceLocation location)
@@ -1214,6 +1217,8 @@ public:
     preamble += "\n";
     preamble += "#include <new>\n";
     preamble += "#include <type_traits>\n";
+    preamble += "\n";
+    preamble += "struct __resumable_dummy_arg {};\n";
     preamble += "\n";
     preamble += "template <class _T>\n";
     preamble += "struct __resumable_copy_disabled : _T {};\n";
