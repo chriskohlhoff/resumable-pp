@@ -537,7 +537,9 @@ public:
     after << "  };\n";
     after << "\n";
     EmitFactory(after);
-    after << "}()()\n\n";
+    after << "}()";
+    EmitCreation(after);
+    after << "\n\n";
     EmitLineNumber(after, body->getLocEnd());
     after << "/*END RESUMABLE LAMBDA DEFINITION*/";
     rewriter_.ReplaceText(afterBody, after.str());
@@ -1120,9 +1122,64 @@ private:
 
   void EmitFactory(std::ostream& os)
   {
-    os << "  return [&]() -> __resumable_lambda_" << lambda_id_ << "\n";
+    os << "  struct __resumable_lambda_" << lambda_id_ << "_factory\n";
     os << "  {\n";
-    os << "    return { __resumable_dummy_arg()";
+    os << "    __resumable_lambda_" << lambda_id_ << " operator()(__resumable_dummy_arg";
+    for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
+    {
+      os << ",\n";
+      if (c->getCaptureKind() == LCK_This)
+      {
+        os << "        __resumable_lambda_" << lambda_id_ << "_this_type __capture_arg_this";
+      }
+      else if (c->isInitCapture())
+      {
+        std::string name = c->getCapturedVar()->getDeclName().getAsString();
+        std::string init = rewriter_.ConvertToString(c->getCapturedVar()->getInit());
+        os << "        __resumable_lambda_" << lambda_id_ << "_" << name << "_type&& __capture_arg_" << name;
+      }
+      else if (c->getCaptureKind() == LCK_ByRef)
+      {
+        std::string name = c->getCapturedVar()->getDeclName().getAsString();
+        os << "        __resumable_lambda_" << lambda_id_ << "_" << name << "_type& __capture_arg_" << name;
+      }
+      else
+      {
+        std::string name = c->getCapturedVar()->getDeclName().getAsString();
+        os << "        const __resumable_lambda_" << lambda_id_ << "_" << name << "_type& __capture_arg_" << name;
+      }
+    }
+    os << ")\n";
+    os << "    {\n";
+    os << "      return {\n";
+    os << "        __resumable_dummy_arg()";
+    for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
+    {
+      os << ",\n";
+      if (c->getCaptureKind() == LCK_This)
+        os << "        __capture_arg_this";
+      else if (c->isInitCapture())
+      {
+        std::string name = c->getCapturedVar()->getDeclName().getAsString();
+        os << "        static_cast<__resumable_lambda_" << lambda_id_ << "_" << name << "_type&&>(__capture_arg_" << name << ")";
+      }
+      else
+      {
+        std::string name = c->getCapturedVar()->getDeclName().getAsString();
+        os << "        __capture_arg_" << name;
+      }
+    }
+    os << "\n";
+    os << "      };\n";
+    os << "    }\n";
+    os << "  };\n";
+    os << "\n";
+    os << "  return __resumable_lambda_" << lambda_id_ << "_factory();\n";
+  }
+
+  void EmitCreation(std::ostream& os)
+  {
+    os << "(__resumable_dummy_arg()";
     for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
     {
       os << ", ";
@@ -1133,8 +1190,7 @@ private:
       else
         os << c->getCapturedVar()->getDeclName().getAsString();
     }
-    os << " };\n";
-    os << "  };\n";
+    os << ")";
   }
 
   void EmitLineNumber(std::ostream& os, SourceLocation location)
