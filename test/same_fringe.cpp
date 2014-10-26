@@ -110,13 +110,11 @@ generator<int> flatten(node& n)
 
 generator<int> flatten(node& n)
 {
-  return [&]() -> int {
-    if (n.left)
-      yield from flatten(*n.left);
+  return [&]() resumable -> int {
+    if (n.left) yield from flatten(*n.left);
     if (!n.right) return n.value;
     yield n.value;
-    generator<int> g2 = flatten(*n.right);
-    return from g2;
+    return from flatten(*n.right);
   };
 }
 

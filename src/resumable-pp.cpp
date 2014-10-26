@@ -120,6 +120,8 @@ Expr* IsYieldKeyword(Stmt* stmt)
 
 Expr* IsFromKeyword(Stmt* stmt)
 {
+  if (ExprWithCleanups* expr = dyn_cast<ExprWithCleanups>(stmt))
+    stmt = expr->getSubExpr();
   if (CXXConstructExpr* construct_expr = dyn_cast<CXXConstructExpr>(stmt))
     if (construct_expr->getNumArgs() == 1)
       if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(construct_expr->getArg(0)))
@@ -443,37 +445,7 @@ public:
       {
         if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(after_from))
         {
-          int curr_scope_id = next_scope_id_;
-          curr_scope_path_.push_back(curr_scope_id);
-          next_scope_id_ = 0;
-          int enclosing_scope_yield_id = curr_scope_yield_id_;
-
-          int temp_yield_id = AddYieldPoint(temp);
-
-          std::string type = "decltype(" + rewriter_.ConvertToString(after_from) + ")";
-          std::string name = "__temp" + std::to_string(temp_yield_id);
-          std::string full_name;
-          for (int scope: curr_scope_path_)
-            full_name += "__s" + std::to_string(scope) + ".";
-          full_name += name;
-
-          std::string expr = "new (static_cast<void*>(&" + full_name + ")) decltype(" + full_name + ")(";
-          expr += rewriter_.getRewrittenText(SourceRange(after_from->getLocStart(), after_from->getLocEnd()));
-          expr += "), __state = " + std::to_string(temp_yield_id);
-
-          iterator iter = scope_to_local_.insert(std::make_pair(curr_scope_path_, local{type, name, full_name, expr, temp_yield_id}));
-          ptr_to_iter_[temp] = iter;
-          yield_to_iter_[temp_yield_id] = iter;
-
-          SourceRange range(after_from->getLocStart(), after_from->getLocEnd());
-          rewriter_.ReplaceText(range, full_name);
-
-          AddYieldPoint(op);
-
-          curr_scope_yield_id_ = enclosing_scope_yield_id;
-          curr_scope_path_.pop_back();
-          next_scope_id_ = curr_scope_id + 1;
-
+          AddTemporary(op, temp);
           return result;
         }
       }
@@ -488,8 +460,17 @@ public:
   {
     bool result = RecursiveASTVisitor<resumable_lambda_locals>::TraverseReturnStmt(stmt);
 
-    if (IsFromKeyword(stmt->getRetValue()))
+    if (Expr* after_from = IsFromKeyword(stmt->getRetValue()))
+    {
+      std::cerr << "after_from is " << std::hex << (std::uintptr_t)after_from << "\n";
+      if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(after_from))
+      {
+        AddTemporary(stmt, temp);
+        return result;
+      }
+
       AddYieldPoint(stmt);
+    }
 
     return result;
   }
@@ -526,6 +507,40 @@ private:
       prior_yield_id = getPriorYieldId(prior_yield_id);
     }
     return yield_id;
+  }
+
+  void AddTemporary(Stmt* parent, MaterializeTemporaryExpr* temp)
+  {
+    int curr_scope_id = next_scope_id_;
+    curr_scope_path_.push_back(curr_scope_id);
+    next_scope_id_ = 0;
+    int enclosing_scope_yield_id = curr_scope_yield_id_;
+
+    int temp_yield_id = AddYieldPoint(temp);
+
+    std::string type = "decltype(" + rewriter_.ConvertToString(temp) + ")";
+    std::string name = "__temp" + std::to_string(temp_yield_id);
+    std::string full_name;
+    for (int scope: curr_scope_path_)
+      full_name += "__s" + std::to_string(scope) + ".";
+    full_name += name;
+
+    std::string expr = "new (static_cast<void*>(&" + full_name + ")) decltype(" + full_name + ")(";
+    expr += rewriter_.getRewrittenText(SourceRange(temp->getLocStart(), temp->getLocEnd()));
+    expr += "), __state = " + std::to_string(temp_yield_id);
+
+    iterator iter = scope_to_local_.insert(std::make_pair(curr_scope_path_, local{type, name, full_name, expr, temp_yield_id}));
+    ptr_to_iter_[temp] = iter;
+    yield_to_iter_[temp_yield_id] = iter;
+
+    SourceRange range(temp->getLocStart(), temp->getLocEnd());
+    rewriter_.ReplaceText(range, full_name);
+
+    AddYieldPoint(parent);
+
+    curr_scope_yield_id_ = enclosing_scope_yield_id;
+    curr_scope_path_.pop_back();
+    next_scope_id_ = curr_scope_id + 1;
   }
 
   Rewriter& rewriter_;
@@ -820,24 +835,35 @@ public:
 
       std::stringstream before;
       before << "\n";
-      before << "        for (;;)\n";
+      before << "        do\n";
       before << "        {\n";
+      if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(after_from))
+      {
+        resumable_lambda_locals::iterator iter = locals_.find(temp);
+        if (iter != locals_.end() && !iter->second.expr.empty())
+          before << "          " << iter->second.expr << ";\n";
+      }
+      before << "          for (;;)\n";
       before << "          {\n";
-      before << "            auto& __g =\n";
+      before << "            {\n";
+      before << "              auto& __g =\n";
       EmitLineNumber(before, after_from->getLocStart());
       rewriter_.ReplaceText(range, before.str());
 
       std::stringstream after;
-      after << "            __state = " << yield_point << ";\n";
-      after << "            __unwind.__locals = nullptr;\n";
-      after << "            auto __ret(__g());\n";
-      after << "            if (__g.is_terminal())\n";
-      after << "              __state = -1;\n";
-      after << "            return __ret;\n";
+      after << "              __state = " << yield_point << ";\n";
+      after << "              __unwind.__locals = nullptr;\n";
+      after << "              auto __ret(__g());\n";
+      after << "              if (__g.is_terminal())\n";
+      after << "                __state = -1;\n";
+      after << "              return __ret;\n";
+      after << "            }\n";
+      after << "          case " << yield_point << ":\n";
+      after << "            (void)0;\n";
       after << "          }\n";
-      after << "        case " << yield_point << ":\n";
-      after << "          (void)0;\n";
-      after << "        }\n";
+      if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(after_from))
+        after << "          __unwind_to(" << locals_.getPriorYieldId(locals_.getYieldId(temp)) << ");\n";
+      after << "        } while (false);\n";
       rewriter_.InsertTextAfter(end, after.str());
     }
 
