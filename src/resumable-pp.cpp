@@ -24,7 +24,11 @@ using namespace clang::driver;
 using namespace clang::tooling;
 
 //------------------------------------------------------------------------------
-// The following code is injected at the beginning of the preprocessed input.
+
+bool verbose = false;
+
+//------------------------------------------------------------------------------
+// The following code is injected at the beginning of the preprocessor input.
 
 const char injected[] = R"-(
 
@@ -1168,7 +1172,8 @@ public:
   {
     for (DeclGroupRef::iterator b = decls.begin(), e = decls.end(); b != e; ++b)
     {
-      (*b)->dump();
+      if (verbose)
+        (*b)->dump();
       visitor_.TraverseDecl(*b);
     }
 
@@ -1194,14 +1199,15 @@ public:
   void EndSourceFileAction() override
   {
     SourceManager& mgr = rewriter_.getSourceMgr();
-    llvm::errs() << "** EndSourceFileAction for: "
-                 << mgr.getFileEntryForID(mgr.getMainFileID())->getName() << "\n";
+    if (verbose)
+      llvm::errs() << "** EndSourceFileAction for: " << mgr.getFileEntryForID(mgr.getMainFileID())->getName() << "\n";
     rewriter_.getEditBuffer(mgr.getMainFileID()).write(llvm::outs());
   }
 
   ASTConsumer* CreateASTConsumer(CompilerInstance& compiler, StringRef file) override
   {
-    llvm::errs() << "** Creating AST consumer for: " << file << "\n";
+    if (verbose)
+      llvm::errs() << "** Creating AST consumer for: " << file << "\n";
     rewriter_.setSourceMgr(compiler.getSourceManager(), compiler.getLangOpts());
     std::string preamble = "#ifndef __RESUMABLE_PREAMBLE\n";
     preamble += "#define __RESUMABLE_PREAMBLE\n";
@@ -1243,17 +1249,24 @@ int main(int argc, const char* argv[])
 {
   if (argc < 2)
   {
-    std::cerr << "Usage: resumable-pp <source> [clang args]\n";
+    std::cerr << "Usage: resumable-pp [-v] <source> [clang args]\n";
     return 1;
   }
 
-  std::vector<std::string> args;
-  args.push_back("-std=c++1y");
-  for (int arg = 2; arg < argc; ++arg)
-    args.push_back(argv[arg]);
+  int arg = 1;
+  if (argv[arg] == std::string("-v"))
+  {
+    verbose = true;
+    ++arg;
+  }
 
   std::vector<std::string> files;
-  files.push_back(argv[1]);
+  files.push_back(argv[arg++]);
+
+  std::vector<std::string> args;
+  args.push_back("-std=c++1y");
+  for (; arg < argc; ++arg)
+    args.push_back(argv[arg]);
 
   FixedCompilationDatabase cdb(".", args);
   ClangTool tool(cdb, files);
