@@ -495,11 +495,24 @@ public:
     EmitLocalsDestructor(before);
     before << "  };\n";
     before << "\n";
+    before << "  struct __resumable_lambda_" << lambda_id_ << ";\n";
+    before << "\n";
+    before << "  struct __resumable_lambda_" << lambda_id_ << "_initializer\n";
+    before << "  {\n";
+    before << "    typedef __resumable_lambda_" << lambda_id_ << " lambda;\n";
+    before << "    __resumable_lambda_" << lambda_id_ << "_capture __capture;\n";
+    before << "  };\n";
+    before << "\n";
     before << "  struct __resumable_lambda_" << lambda_id_ << " :\n";
-    before << "    __resumable_lambda_" << lambda_id_ << "_capture,\n";
-    before << "    __resumable_lambda_" << lambda_id_ << "_locals\n";
+    before << "    private __resumable_lambda_" << lambda_id_ << "_capture,\n";
+    before << "    private __resumable_lambda_" << lambda_id_ << "_locals\n";
     before << "  {\n";
     EmitConstructor(before);
+    before << "\n";
+    before << "    __resumable_lambda_" << lambda_id_ << "_initializer operator*() &&\n";
+    before << "    {\n";
+    before << "      return { static_cast<__resumable_lambda_" << lambda_id_ << "_capture&&>(*this) };\n";
+    before << "    }\n";
     before << "\n";
     before << "    bool is_initial() const noexcept { return __state == 0; }\n";
     before << "    bool is_terminal() const noexcept { return __state == -1; }\n";
@@ -1077,6 +1090,12 @@ private:
       }
     }
     os << ")\n";
+    os << "    {\n";
+    os << "    }\n";
+    os << "\n";
+    os << "    __resumable_lambda_" << lambda_id_ << "(__resumable_lambda_" << lambda_id_ << "_initializer&& __init) :\n";
+    os << "      __resumable_lambda_" << lambda_id_ << "_capture(\n";
+    os << "          static_cast<__resumable_lambda_" << lambda_id_ << "_capture&&>(__init.__capture))\n";
     os << "    {\n";
     os << "    }\n";
   }
