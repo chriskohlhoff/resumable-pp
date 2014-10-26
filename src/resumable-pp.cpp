@@ -499,7 +499,7 @@ public:
     before << "\n";
     before << "  struct __resumable_lambda_" << lambda_id_ << "_initializer\n";
     before << "  {\n";
-    before << "    typedef __resumable_lambda_" << lambda_id_ << " lambda;\n";
+    before << "    typedef __resumable_lambda_" << lambda_id_ << " lambda __RESUMABLE_UNUSED_TYPEDEF;\n";
     before << "    __resumable_lambda_" << lambda_id_ << "_capture __capture;\n";
     before << "  };\n";
     before << "\n";
@@ -964,7 +964,8 @@ private:
       os << "      ::std::is_copy_constructible<" << v->second->getType().getAsString() << ">::value &&\n";
     os << "      true };\n";
     os << "\n";
-    os << "    typedef ::std::integral_constant<bool, __is_copy_constructible_v> __is_copy_constructible;\n";
+    os << "    typedef ::std::integral_constant<bool, __is_copy_constructible_v>\n";
+    os << "      __is_copy_constructible __RESUMABLE_UNUSED_TYPEDEF;\n";
     os << "\n";
     os << "    typedef typename ::std::conditional<__is_copy_constructible_v,\n";
     os << "        __resumable_lambda_" << lambda_id_ << "_locals,\n";
@@ -1004,7 +1005,8 @@ private:
       os << "      ::std::is_move_constructible<" << v->second->getType().getAsString() << ">::value &&\n";
     os << "      true };\n";
     os << "\n";
-    os << "    typedef ::std::integral_constant<bool, __is_move_constructible_v> __is_move_constructible;\n";
+    os << "    typedef ::std::integral_constant<bool, __is_move_constructible_v>\n";
+    os << "      __is_move_constructible __RESUMABLE_UNUSED_TYPEDEF;\n";
     os << "\n";
     os << "    typedef typename ::std::conditional<__is_move_constructible_v,\n";
     os << "        __resumable_lambda_" << lambda_id_ << "_locals,\n";
@@ -1292,6 +1294,15 @@ public:
     preamble += "\n";
     preamble += "#include <new>\n";
     preamble += "#include <type_traits>\n";
+    preamble += "\n";
+    preamble += "#ifdef __GNUC__\n";
+    preamble += "# if ((__GNUC__ == 4) && (__GNUC_MINOR__ >= 8)) || (__GNUC__ > 4)\n";
+    preamble += "#  define __RESUMABLE_UNUSED_TYPEDEF __attribute__((__unused__))\n";
+    preamble += "# endif\n";
+    preamble += "#endif\n";
+    preamble += "#ifndef __RESUMABLE_UNUSED_TYPEDEF\n";
+    preamble += "# define __RESUMABLE_UNUSED_TYPEDEF\n";
+    preamble += "#endif\n";
     preamble += "\n";
     preamble += "struct __resumable_dummy_arg {};\n";
     preamble += "\n";
