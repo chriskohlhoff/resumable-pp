@@ -36,7 +36,7 @@ struct __yield_t
 {
   constexpr __yield_t() {}
   template <class T> operator T() const;
-  template <class T> __yield_t operator&(const T&) const;
+  template <class T> __yield_t operator&(const T&) const { return {}; }
 };
 
 constexpr __yield_t __yield;
@@ -45,7 +45,7 @@ struct __from_t
 {
   constexpr __from_t() {}
   template <class T> operator T() const;
-  template <class T> __from_t operator&(const T&) const;
+  template <class T> __from_t operator&(const T&) const { return {}; }
 };
 
 constexpr __from_t __from;
