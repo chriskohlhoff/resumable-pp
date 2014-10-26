@@ -322,6 +322,12 @@ public:
     curr_scope_path_.push_back(next_scope_id_);
     next_scope_id_ = 0;
 
+    if (stmt->getCond())
+      TraverseStmt(stmt->getCond());
+
+    if (stmt->getInc())
+      TraverseStmt(stmt->getInc());
+
     TraverseStmt(stmt->getBody());
 
     curr_scope_yield_id_ = enclosing_scope_yield_id;
