@@ -201,7 +201,7 @@ public:
     std::string type;
     std::string name;
     std::string full_name;
-    std::string expr;
+    std::string generator_expr;
     int yield_id;
   };
 
@@ -458,7 +458,7 @@ public:
       {
         if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(after_from))
         {
-          AddTemporary(op, temp);
+          AddGenerator(op, temp);
         }
         else
         {
@@ -483,7 +483,7 @@ public:
     {
       if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(after_from))
       {
-        AddTemporary(stmt, temp);
+        AddGenerator(stmt, temp);
 
         return result;
       }
@@ -530,7 +530,7 @@ private:
     return yield_id;
   }
 
-  void AddTemporary(Stmt* parent, MaterializeTemporaryExpr* temp)
+  void AddGenerator(Stmt* parent, MaterializeTemporaryExpr* temp)
   {
     int curr_scope_id = next_scope_id_;
     curr_scope_path_.push_back(curr_scope_id);
@@ -539,16 +539,22 @@ private:
 
     int temp_yield_id = AddYieldPoint(temp);
 
-    std::string type = "decltype(" + rewriter_.ConvertToString(temp) + ")";
+    std::string inner_type = rewriter_.ConvertToString(temp);
+    std::string type = "__resumable_generator_type<decltype(" + inner_type + ")>::_Type";
     std::string name = "__temp" + std::to_string(temp_yield_id);
     std::string full_name;
     for (int scope: curr_scope_path_)
       full_name += "__s" + std::to_string(scope) + ".";
     full_name += name;
 
-    std::string expr = "new (static_cast<void*>(&" + full_name + ")) decltype(" + full_name + ")(";
+    std::string expr = "__resumable_generator_init(&" + full_name + "), ";
+    expr += "__state = " + std::to_string(temp_yield_id) + ", ";
+    expr += "__resumable_generator_construct(&" + full_name + ", ";
+    expr += rewriter_.getRewrittenText(SourceRange(temp->getLocStart(), temp->getLocEnd())) + ")";
+
+    /*std::string expr = "new (static_cast<void*>(&" + full_name + ")) decltype(" + full_name + ")(";
     expr += rewriter_.getRewrittenText(SourceRange(temp->getLocStart(), temp->getLocEnd()));
-    expr += "), __state = " + std::to_string(temp_yield_id);
+    expr += "), __state = " + std::to_string(temp_yield_id);*/
 
     iterator iter = scope_to_local_.insert(std::make_pair(curr_scope_path_, local{type, name, full_name, expr, temp_yield_id}));
     ptr_to_iter_[temp] = iter;
@@ -558,7 +564,10 @@ private:
     rewriter_.ReplaceText(range, full_name);
 
     int yield_id = AddYieldPoint(parent);
+    yield_to_iter_[yield_id] = iter;
+
     yield_to_subgen_[yield_id] = full_name;
+    yield_to_subgen_[temp_yield_id] = full_name;
 
     curr_scope_yield_id_ = enclosing_scope_yield_id;
     curr_scope_path_.pop_back();
@@ -654,10 +663,12 @@ public:
     before << "  };\n";
     before << "\n";
     before << "  struct __resumable_lambda_" << lambda_id_ << ";\n";
+    before << "  struct __resumable_lambda_" << lambda_id_ << "_in_place;\n";
     before << "\n";
     before << "  struct __resumable_lambda_" << lambda_id_ << "_initializer\n";
     before << "  {\n";
     before << "    typedef __resumable_lambda_" << lambda_id_ << " lambda __RESUMABLE_UNUSED_TYPEDEF;\n";
+    before << "    typedef __resumable_lambda_" << lambda_id_ << "_in_place generator_type __RESUMABLE_UNUSED_TYPEDEF;\n";
     before << "    __resumable_lambda_" << lambda_id_ << "_capture __capture;\n";
     before << "  };\n";
     before << "\n";
@@ -699,6 +710,8 @@ public:
     after << "      }\n";
     after << "    }\n";
     after << "  };\n";
+    after << "\n";
+    EmitInPlaceGenerator(after);
     after << "\n";
     EmitFactory(after);
     after << "}()";
@@ -790,22 +803,24 @@ public:
         if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(after_from))
         {
           resumable_lambda_locals::iterator iter = locals_.find(temp);
-          if (iter != locals_.end() && !iter->second.expr.empty())
+          if (iter != locals_.end() && !iter->second.generator_expr.empty())
           {
             EmitLineNumber(os, after_from->getLocStart());
-            os << "          " << iter->second.expr << ";\n";
+            os << "          " << iter->second.generator_expr << ";\n";
           }
         }
+        os << "          __state = " << yield_point << ";\n";
         os << "          for (;;)\n";
         os << "          {\n";
         os << "            {\n";
         EmitLineNumber(os, after_from->getLocStart());
         os << "              auto& __g = " << expr.substr(0, expr.length() - 1) << ";\n";
         os << "              if (__g.is_terminal()) break;\n";
-        os << "              __state = " << yield_point << ";\n";
         os << "              __unwind.__locals = nullptr;\n";
         os << "              return __g();\n";
         os << "            }\n";
+        if (dyn_cast<MaterializeTemporaryExpr>(after_from))
+          os << "          case " << yield_point - 1 << ":\n";
         os << "          case " << yield_point << ":\n";
         os << "            (void)0;\n";
         os << "          }\n";
@@ -867,20 +882,22 @@ public:
       if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(after_from))
       {
         resumable_lambda_locals::iterator iter = locals_.find(temp);
-        if (iter != locals_.end() && !iter->second.expr.empty())
-          os << "          " << iter->second.expr << ";\n";
+        if (iter != locals_.end() && !iter->second.generator_expr.empty())
+          os << "          " << iter->second.generator_expr << ";\n";
       }
+      os << "          __state = " << yield_point << ";\n";
       os << "          for (;;)\n";
       os << "          {\n";
       os << "            {\n";
       os << "              auto& __g = " << expr.substr(0, expr.length() - 1) << ";\n";
-      os << "              __state = " << yield_point << ";\n";
       os << "              __unwind.__locals = nullptr;\n";
       os << "              auto __ret(__g());\n";
       os << "              if (__g.is_terminal())\n";
       os << "                __state = -1;\n";
       os << "              return __ret;\n";
       os << "            }\n";
+      if (dyn_cast<MaterializeTemporaryExpr>(after_from))
+        os << "          case " << yield_point - 1 << ":\n";
       os << "          case " << yield_point << ":\n";
       os << "            (void)0;\n";
       os << "          }\n";
@@ -1052,8 +1069,19 @@ private:
       {
         std::string name = iter->second.full_name;
         os << "          {\n";
-        os << "            typedef decltype(" << name << ") __type;\n";
-        os << "            " << name << ".~__type();\n";
+        if (iter->second.generator_expr.empty())
+        {
+          os << "            typedef decltype(" << name << ") __type;\n";
+          os << "            " << name << ".~__type();\n";
+        }
+        else if (iter == locals_.find(yield_id - 1))
+        {
+          os << "            __resumable_generator_destroy(&" + name + ");\n";
+        }
+        else
+        {
+          os << "            __resumable_generator_fini(&" + name + ");\n";
+        }
         os << "            __state = " << prior_yield_id << ";\n";
         os << "          }\n";
       }
@@ -1302,6 +1330,32 @@ private:
     os << "    }\n";
   }
 
+  void EmitInPlaceGenerator(std::ostream& os)
+  {
+    os << "  struct __resumable_lambda_" << lambda_id_ << "_in_place\n";
+    os << "  {\n";
+    os << "    __resumable_lambda_" << lambda_id_ << "_in_place() {}\n";
+    os << "    __resumable_lambda_" << lambda_id_ << "_in_place(const __resumable_lambda_" << lambda_id_ << "_in_place&) = delete;\n";
+    os << "    __resumable_lambda_" << lambda_id_ << "_in_place(__resumable_lambda_" << lambda_id_ << "_in_place&&) = delete;\n";
+    os << "    __resumable_lambda_" << lambda_id_ << "_in_place& operator=(__resumable_lambda_" << lambda_id_ << "_in_place&&) = delete;\n";
+    os << "    __resumable_lambda_" << lambda_id_ << "_in_place& operator=(const __resumable_lambda_" << lambda_id_ << "_in_place&) = delete;\n";
+    os << "    ~__resumable_lambda_" << lambda_id_ << "_in_place() {}\n";
+    os << "\n";
+    os << "    void construct(__resumable_lambda_" << lambda_id_ << "_initializer&& __init)\n";
+    os << "    {\n";
+    os << "      new (static_cast<void*>(&__lambda)) __resumable_lambda_" << lambda_id_ << "(\n";
+    os << "          static_cast<__resumable_lambda_" << lambda_id_ << "_initializer&&>(__init));\n";
+    os << "    }\n";
+    os << "\n";
+    os << "    void destroy()\n";
+    os << "    {\n";
+    os << "      __lambda.~__resumable_lambda_" << lambda_id_ << "();\n";
+    os << "    }\n";
+    os << "\n";
+    os << "    union { __resumable_lambda_" << lambda_id_ << " __lambda; };\n";
+    os << "  };\n";
+  }
+
   void EmitFactory(std::ostream& os)
   {
     os << "  struct __resumable_lambda_" << lambda_id_ << "_factory\n";
@@ -1501,6 +1555,71 @@ public:
     preamble += "\n";
     preamble += "template <class _T, class... _Args>\n";
     preamble += "inline void __resumable_local_new(::std::false_type, _T*, _Args&&...)\n";
+    preamble += "{\n";
+    preamble += "}\n";
+    preamble += "\n";
+    preamble += "template <class>\n";
+    preamble += "struct __resumable_check { typedef void _Type; };\n";
+    preamble += "\n";
+    preamble += "template <class _T>\n";
+    preamble += "struct __resumable_generator : _T {};\n";
+    preamble += "\n";
+    preamble += "template <class _T, class = void>\n";
+    preamble += "struct __resumable_generator_type\n";
+    preamble += "{\n";
+    preamble += "  typedef _T _Type;\n";
+    preamble += "};\n";
+    preamble += "\n";
+    preamble += "template <class _T>\n";
+    preamble += "struct __resumable_generator_type<_T,\n";
+    preamble += "  typename __resumable_check<typename _T::generator_type>::_Type>\n";
+    preamble += "{\n";
+    preamble += "  typedef __resumable_generator<typename _T::generator_type> _Type;\n";
+    preamble += "};\n";
+    preamble += "\n";
+    preamble += "template <class _T>\n";
+    preamble += "inline void __resumable_generator_init(__resumable_generator<_T>* __p)\n";
+    preamble += "{\n";
+    preamble += "  new (static_cast<void*>(__p)) __resumable_generator<_T>;\n";
+    preamble += "}\n";
+    preamble += "\n";
+    preamble += "template <class _T, class... _Args>\n";
+    preamble += "inline void __resumable_generator_construct(__resumable_generator<_T>* __p, _Args&&... __args)\n";
+    preamble += "{\n";
+    preamble += "  __p->construct(static_cast<_Args&&>(__args)...);\n";
+    preamble += "}\n";
+    preamble += "\n";
+    preamble += "template <class _T>\n";
+    preamble += "inline void __resumable_generator_destroy(__resumable_generator<_T>* __p)\n";
+    preamble += "{\n";
+    preamble += "  __p->destroy();\n";
+    preamble += "}\n";
+    preamble += "\n";
+    preamble += "template <class _T>\n";
+    preamble += "inline void __resumable_generator_fini(__resumable_generator<_T>* __p)\n";
+    preamble += "{\n";
+    preamble += "  __p->~_T();\n";
+    preamble += "}\n";
+    preamble += "\n";
+    preamble += "template <class _T>\n";
+    preamble += "inline void __resumable_generator_init(_T* __p)\n";
+    preamble += "{\n";
+    preamble += "}\n";
+    preamble += "\n";
+    preamble += "template <class _T, class... _Args>\n";
+    preamble += "inline void __resumable_generator_construct(_T* __p, _Args&&... __args)\n";
+    preamble += "{\n";
+    preamble += "  new (static_cast<void*>(__p)) _T(static_cast<_Args&&>(__args)...);\n";
+    preamble += "}\n";
+    preamble += "\n";
+    preamble += "template <class _T>\n";
+    preamble += "inline void __resumable_generator_destroy(_T* __p)\n";
+    preamble += "{\n";
+    preamble += "  __p->~_T();\n";
+    preamble += "}\n";
+    preamble += "\n";
+    preamble += "template <class _T>\n";
+    preamble += "inline void __resumable_generator_fini(_T* __p)\n";
     preamble += "{\n";
     preamble += "}\n";
     preamble += "\n";
