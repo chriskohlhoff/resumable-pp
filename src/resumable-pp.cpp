@@ -391,8 +391,10 @@ public:
     return true;
   }
 
-  bool VisitVarDecl(VarDecl* decl)
+  bool TraverseVarDecl(VarDecl* decl)
   {
+    bool result = RecursiveASTVisitor<resumable_lambda_locals>::TraverseVarDecl(decl);
+
     if (decl->hasLocalStorage())
     {
       int yield_id = AddYieldPoint(decl);
@@ -411,11 +413,11 @@ public:
 
         if (CXXConstructExpr* construct_expr = dyn_cast<CXXConstructExpr>(decl->getInit()))
         {
-          std::string init = "new (static_cast<void*>(&" + full_name + ")) " + type;
-          std::string state_change = ", __state = " + std::to_string(yield_id);
-          SourceRange range(decl->getLocStart(), construct_expr->getLocStart());
-          rewriter_.ReplaceText(range, init);
-          rewriter_.InsertTextAfterToken(decl->getLocEnd(), state_change);
+          std::string init = "new (static_cast<void*>(&" + full_name + ")) " + type + "(";
+          if (construct_expr->getNumArgs() > 0)
+            init += rewriter_.getRewrittenText(construct_expr->getParenOrBraceRange());
+          init += "), __state = " + std::to_string(yield_id);
+          rewriter_.ReplaceText(SourceRange(decl->getLocStart(), decl->getLocEnd()), init);
         }
         else if (ExprWithCleanups* expr = dyn_cast<ExprWithCleanups>(decl->getInit()))
         {
@@ -424,10 +426,9 @@ public:
             if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(construct_expr->getArg(0)))
             {
               std::string init = "new (static_cast<void*>(&" + full_name + ")) " + type + "(";
-              std::string state_change = "), __state = " + std::to_string(yield_id);
-              SourceRange range(decl->getLocStart(), temp->getLocStart().getLocWithOffset(-1));
-              rewriter_.ReplaceText(range, init);
-              rewriter_.InsertTextAfterToken(decl->getLocEnd(), state_change);
+              init += rewriter_.getRewrittenText(SourceRange(temp->getLocStart(), temp->getLocEnd()));
+              init += "), __state = " + std::to_string(yield_id);
+              rewriter_.ReplaceText(SourceRange(decl->getLocStart(), decl->getLocEnd()), init);
             }
           }
         }
@@ -444,7 +445,7 @@ public:
       }
     }
 
-    return true;
+    return result;
   }
 
   bool TraverseConditionalOperator(ConditionalOperator* op)
@@ -494,13 +495,14 @@ public:
     return result;
   }
 
-  bool VisitDeclRefExpr(DeclRefExpr* expr)
+  bool TraverseDeclRefExpr(DeclRefExpr* expr)
   {
+    bool result = RecursiveASTVisitor<resumable_lambda_locals>::TraverseDeclRefExpr(expr);
+
     iterator iter = find(expr->getDecl());
     if (iter != end())
     {
-      SourceRange range(expr->getLocStart(), expr->getLocation());
-      rewriter_.ReplaceText(range, iter->second.full_name);
+      rewriter_.ReplaceText(SourceRange(expr->getLocStart(), expr->getLocEnd()), iter->second.full_name);
     }
     else if (expr->getDecl()->getType().getAsString() == "const struct __lambda_this_t")
     {
@@ -509,7 +511,7 @@ public:
       rewriter_.ReplaceText(range, "this");
     }
 
-    return true;
+    return result;
   }
 
 private:
@@ -776,70 +778,71 @@ public:
       {
         // "yield from"
 
-        auto yield = rewriter_.getSourceMgr().getImmediateExpansionRange(op->getLocStart());
-        auto from = rewriter_.getSourceMgr().getImmediateExpansionRange(after_yield->getLocStart());
-        auto end = Lexer::findLocationAfterToken(op->getLocEnd(), tok::semi, rewriter_.getSourceMgr(), rewriter_.getLangOpts(), true);
-        SourceRange range(yield.first, from.second);
+        SourceRange range(after_from->getLocStart(), Lexer::getLocForEndOfToken(after_from->getLocEnd(), 0, rewriter_.getSourceMgr(), rewriter_.getLangOpts()));
+        std::string expr = rewriter_.getRewrittenText(range);
 
         int yield_point = locals_.getYieldId(op);
 
-        std::stringstream before;
-        before << "\n";
-        before << "        do\n";
-        before << "        {\n";
+        std::stringstream os;
+        os << "\n";
+        os << "        do\n";
+        os << "        {\n";
         if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(after_from))
         {
           resumable_lambda_locals::iterator iter = locals_.find(temp);
           if (iter != locals_.end() && !iter->second.expr.empty())
-            before << "          " << iter->second.expr << ";\n";
+          {
+            EmitLineNumber(os, after_from->getLocStart());
+            os << "          " << iter->second.expr << ";\n";
+          }
         }
-        before << "          for (;;)\n";
-        before << "          {\n";
-        before << "            {\n";
-        before << "              auto& __g =\n";
-        EmitLineNumber(before, after_from->getLocStart());
-        rewriter_.ReplaceText(range, before.str());
-
-        std::stringstream after;
-        after << "              if (__g.is_terminal()) break;\n";
-        after << "              __state = " << yield_point << ";\n";
-        after << "              __unwind.__locals = nullptr;\n";
-        after << "              return __g();\n";
-        after << "            }\n";
-        after << "          case " << yield_point << ":\n";
-        after << "            (void)0;\n";
-        after << "          }\n";
+        os << "          for (;;)\n";
+        os << "          {\n";
+        os << "            {\n";
+        EmitLineNumber(os, after_from->getLocStart());
+        os << "              auto& __g = " << expr.substr(0, expr.length() - 1) << ";\n";
+        os << "              if (__g.is_terminal()) break;\n";
+        os << "              __state = " << yield_point << ";\n";
+        os << "              __unwind.__locals = nullptr;\n";
+        os << "              return __g();\n";
+        os << "            }\n";
+        os << "          case " << yield_point << ":\n";
+        os << "            (void)0;\n";
+        os << "          }\n";
         if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(after_from))
-          after << "          __unwind_to(" << locals_.getPriorYieldId(locals_.getYieldId(temp)) << ");\n";
-        after << "        } while (false);\n";
-        rewriter_.InsertTextAfter(end, after.str());
+          os << "          __unwind_to(" << locals_.getPriorYieldId(locals_.getYieldId(temp)) << ");\n";
+        os << "        } while (false)" << expr.back();
+
+        rewriter_.ReplaceText(range, os.str());
+        auto macro = rewriter_.getSourceMgr().getImmediateExpansionRange(op->getLocStart());
+        rewriter_.ReplaceText(SourceRange(macro.first, macro.second), "/*yield*/");
+        macro = rewriter_.getSourceMgr().getImmediateExpansionRange(after_yield->getLocStart());
+        rewriter_.ReplaceText(SourceRange(macro.first, macro.second), "/*from*/");
       }
       else
       {
         // "yield"
 
-        auto yield = rewriter_.getSourceMgr().getImmediateExpansionRange(op->getLocStart());
-        auto end = Lexer::getLocForEndOfToken(op->getLocEnd(), 0, rewriter_.getSourceMgr(), rewriter_.getLangOpts());
-        SourceRange range(yield.first, yield.second);
+        SourceRange range(after_yield->getLocStart(), Lexer::getLocForEndOfToken(after_yield->getLocEnd(), 0, rewriter_.getSourceMgr(), rewriter_.getLangOpts()));
+        std::string expr = rewriter_.getRewrittenText(range);
 
         int yield_point = locals_.getYieldId(op);
 
-        std::stringstream before;
-        before << "\n";
-        before << "        do\n";
-        before << "        {\n";
-        before << "          __state = " << yield_point << ";\n";
-        before << "          __unwind.__locals = nullptr;\n";
-        before << "          return\n";
-        EmitLineNumber(before, after_yield->getLocStart());
-        rewriter_.ReplaceText(range, before.str());
+        std::stringstream os;
+        os << "\n";
+        os << "        do\n";
+        os << "        {\n";
+        os << "          __state = " << yield_point << ";\n";
+        os << "          __unwind.__locals = nullptr;\n";
+        EmitLineNumber(os, after_yield->getLocStart());
+        os << "          return " << expr.substr(0, expr.length() - 1) << ";\n";
+        os << "        case " << yield_point << ":\n";
+        os << "          (void)0;\n";
+        os << "        } while (false)" << expr.back();
 
-        std::stringstream after;
-        after << ";\n";
-        after << "        case " << yield_point << ":\n";
-        after << "          (void)0;\n";
-        after << "        } while (false)";
-        rewriter_.InsertTextBefore(end, after.str());
+        rewriter_.ReplaceText(range, os.str());
+        auto macro = rewriter_.getSourceMgr().getImmediateExpansionRange(op->getLocStart());
+        rewriter_.ReplaceText(SourceRange(macro.first, macro.second), "/*yield*/");
       }
     }
 
@@ -852,44 +855,43 @@ public:
     {
       // "return from"
 
-      auto from = rewriter_.getSourceMgr().getImmediateExpansionRange(stmt->getRetValue()->getLocStart());
-      auto end = Lexer::findLocationAfterToken(stmt->getLocEnd(), tok::semi, rewriter_.getSourceMgr(), rewriter_.getLangOpts(), true);
-      SourceRange range(stmt->getLocStart(), from.second);
+      SourceRange range(after_from->getLocStart(), Lexer::getLocForEndOfToken(after_from->getLocEnd(), 0, rewriter_.getSourceMgr(), rewriter_.getLangOpts()));
+      std::string expr = rewriter_.getRewrittenText(range);
 
       int yield_point = locals_.getYieldId(stmt);
 
-      std::stringstream before;
-      before << "\n";
-      before << "        do\n";
-      before << "        {\n";
+      std::stringstream os;
+      os << "\n";
+      os << "        do\n";
+      os << "        {\n";
       if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(after_from))
       {
         resumable_lambda_locals::iterator iter = locals_.find(temp);
         if (iter != locals_.end() && !iter->second.expr.empty())
-          before << "          " << iter->second.expr << ";\n";
+          os << "          " << iter->second.expr << ";\n";
       }
-      before << "          for (;;)\n";
-      before << "          {\n";
-      before << "            {\n";
-      before << "              auto& __g =\n";
-      EmitLineNumber(before, after_from->getLocStart());
-      rewriter_.ReplaceText(range, before.str());
-
-      std::stringstream after;
-      after << "              __state = " << yield_point << ";\n";
-      after << "              __unwind.__locals = nullptr;\n";
-      after << "              auto __ret(__g());\n";
-      after << "              if (__g.is_terminal())\n";
-      after << "                __state = -1;\n";
-      after << "              return __ret;\n";
-      after << "            }\n";
-      after << "          case " << yield_point << ":\n";
-      after << "            (void)0;\n";
-      after << "          }\n";
+      os << "          for (;;)\n";
+      os << "          {\n";
+      os << "            {\n";
+      os << "              auto& __g = " << expr.substr(0, expr.length() - 1) << ";\n";
+      os << "              __state = " << yield_point << ";\n";
+      os << "              __unwind.__locals = nullptr;\n";
+      os << "              auto __ret(__g());\n";
+      os << "              if (__g.is_terminal())\n";
+      os << "                __state = -1;\n";
+      os << "              return __ret;\n";
+      os << "            }\n";
+      os << "          case " << yield_point << ":\n";
+      os << "            (void)0;\n";
+      os << "          }\n";
       if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(after_from))
-        after << "          __unwind_to(" << locals_.getPriorYieldId(locals_.getYieldId(temp)) << ");\n";
-      after << "        } while (false);\n";
-      rewriter_.InsertTextAfter(end, after.str());
+        os << "          __unwind_to(" << locals_.getPriorYieldId(locals_.getYieldId(temp)) << ");\n";
+      os << "        } while (false)" << expr.back();
+
+      rewriter_.ReplaceText(range, os.str());
+      rewriter_.ReplaceText(stmt->getLocStart(), 6, "/*return*/");
+      auto macro = rewriter_.getSourceMgr().getImmediateExpansionRange(stmt->getRetValue()->getLocStart());
+      rewriter_.ReplaceText(SourceRange(macro.first, macro.second), "/*from*/");
     }
 
     return true;
