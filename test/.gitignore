@@ -1,3 +1,4 @@
 .pp.*
 .*.res
 .*.out
+*.dSYM
