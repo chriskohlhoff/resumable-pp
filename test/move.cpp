@@ -11,7 +11,7 @@ struct copyable
 
 int main()
 {
-  auto g1 = []() resumable
+  auto g1 = []() resumable -> int
   {
     {
       copyable<1> c1;
@@ -28,6 +28,6 @@ int main()
   printf("g1 returned %d\n", g1());
   printf("g1 returned %d\n", g1());
   auto g2(std::move(g1));
-  printf("g1 is_terminal() returned %d\n", g1.is_terminal() ? 1 : 0);
+  printf("g1 is_terminal() returned %d\n", is_terminal(g1) ? 1 : 0);
   printf("g2 returned %d\n", g2());
 }

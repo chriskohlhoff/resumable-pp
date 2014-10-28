@@ -22,6 +22,6 @@ int main()
     return from f2;
   };
 
-  while (!f.is_terminal())
+  while (!is_terminal(f))
     printf("%d\n", f());
 }

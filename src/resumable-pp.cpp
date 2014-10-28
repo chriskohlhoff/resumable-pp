@@ -32,6 +32,8 @@ bool verbose = false;
 
 const char injected[] = R"-(
 
+#include <typeinfo>
+
 struct __yield_t
 {
   constexpr __yield_t() {}
@@ -59,6 +61,15 @@ struct __lambda_this_t
 };
 
 constexpr __lambda_this_t __lambda_this;
+
+template <class _T> bool is_initial(const _T&) noexcept { return false; }
+template <class _T> bool is_terminal(const _T&) noexcept { return false; }
+template <class _T> const std::type_info& wanted_type(const _T&) noexcept { return typeid(void); }
+template <class _T> void* wanted(_T&) noexcept { return nullptr; }
+template <class _T> const void* wanted(const _T&) noexcept { return nullptr; }
+template <class _T> _T initializer(_T&& __t) { return static_cast<_T&&>(__t); }
+template <class _T> struct lambda { typedef _T type; };
+template <class _T> using lambda_t = typename lambda<_T>::type;
 
 #define resumable __attribute__((__annotate__("resumable"))) mutable
 #define yield 0 ? throw __yield : throw
@@ -1664,6 +1675,63 @@ public:
     preamble += "inline void __resumable_generator_fini(_T* __p)\n";
     preamble += "{\n";
     preamble += "}\n";
+    preamble += "\n";
+    preamble += "template <class _T>\n";
+    preamble += "inline bool is_initial(const _T& __t,\n";
+    preamble += "    typename __resumable_check<decltype(__t.is_initial())>::_Type* = 0) noexcept\n";
+    preamble += "{\n";
+    preamble += "  return __t.is_initial();\n";
+    preamble += "}\n";
+    preamble += "\n";
+    preamble += "template <class _T>\n";
+    preamble += "inline bool is_terminal(const _T& __t,\n";
+    preamble += "    typename __resumable_check<decltype(__t.is_terminal())>::_Type* = 0) noexcept\n";
+    preamble += "{\n";
+    preamble += "  return __t.is_terminal();\n";
+    preamble += "}\n";
+    preamble += "\n";
+    preamble += "template <class _T>\n";
+    preamble += "inline const ::std::type_info& wanted_type(const _T& __t,\n";
+    preamble += "    typename __resumable_check<decltype(__t.wanted_type())>::_Type* = 0) noexcept\n";
+    preamble += "{\n";
+    preamble += "  return __t.wanted_type();\n";
+    preamble += "}\n";
+    preamble += "\n";
+    preamble += "template <class _T>\n";
+    preamble += "inline void* wanted(_T& __t,\n";
+    preamble += "    typename __resumable_check<decltype(__t.wanted())>::_Type* = 0) noexcept\n";
+    preamble += "{\n";
+    preamble += "  return __t.wanted();\n";
+    preamble += "}\n";
+    preamble += "\n";
+    preamble += "template <class _T>\n";
+    preamble += "inline const void* wanted(const _T& __t,\n";
+    preamble += "    typename __resumable_check<decltype(__t.wanted())>::_Type* = 0) noexcept\n";
+    preamble += "{\n";
+    preamble += "  return __t.wanted();\n";
+    preamble += "}\n";
+    preamble += "\n";
+    preamble += "template <class _T>\n";
+    preamble += "inline auto initializer(_T&& __t,\n";
+    preamble += "    typename __resumable_check<typename decltype(*::std::declval<_T>())::generator_type>::_Type* = 0)\n";
+    preamble += "{\n";
+    preamble += "  return *static_cast<_T&&>(__t);\n";
+    preamble += "}\n";
+    preamble += "\n";
+    preamble += "template <class _T, class = void>\n";
+    preamble += "struct lambda\n";
+    preamble += "{\n";
+    preamble += "  typedef _T type;\n";
+    preamble += "};\n";
+    preamble += "\n";
+    preamble += "template <class _T>\n";
+    preamble += "struct lambda<_T,\n";
+    preamble += "  typename __resumable_check<typename _T::lambda>::_Type>\n";
+    preamble += "{\n";
+    preamble += "  typedef typename _T::lambda type;\n";
+    preamble += "};\n";
+    preamble += "\n";
+    preamble += "template <class _T> using lambda_t = typename lambda<_T>::type;\n";
     preamble += "\n";
     preamble += "#endif // __RESUMABLE_PREAMBLE\n";
     preamble += "\n";

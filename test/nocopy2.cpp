@@ -11,23 +11,21 @@ struct noncopyable
 
 auto countdown(int n)
 {
-  auto&& f = [=]() resumable
+  return initializer([=]() resumable
   {
     noncopyable<1> c1;
 
     while (--n > 0)
       if (n == 1) return n;
       else yield n;
-  };
-
-  return *std::move(f);
+  });
 }
 
 int main()
 {
   auto i = countdown(10);
-  decltype(i)::lambda f(std::move(i));
+  lambda_t<decltype(i)> f(std::move(i));
 
-  while (!f.is_terminal())
+  while (!is_terminal(f))
     printf("%d\n", f());
 }

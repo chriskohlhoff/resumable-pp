@@ -10,6 +10,6 @@ int main()
       else yield n;
   };
 
-  while (!f.is_terminal())
+  while (!is_terminal(f))
     printf("%d\n", f());
 }

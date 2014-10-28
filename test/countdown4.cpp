@@ -18,6 +18,6 @@ int main()
     return from countdown(5);
   };
 
-  while (!f.is_terminal())
+  while (!is_terminal(f))
     printf("%d\n", f());
 }

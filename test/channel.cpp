@@ -157,7 +157,7 @@ int main()
     } while (i != -1);
   };
 
-  while (!puller.is_terminal())
+  while (!is_terminal(puller))
   {
     puller();
     pusher();

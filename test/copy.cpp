@@ -9,7 +9,7 @@ struct copyable
 
 int main()
 {
-  auto g1 = []() resumable
+  auto g1 = []() resumable -> int
   {
     {
       copyable<1> c1;

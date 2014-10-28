@@ -10,7 +10,9 @@ END_GROUP = -Wl,--end-group
 endif
 
 ifeq ($(OS_ARCH),Darwin)
-PP_CXXFLAGS = -I/usr/include/c++/4.2.1
+PP_CXXFLAGS = \
+	-I/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/include/c++/v1 \
+	-I/Applications/Xcode.app/Contents/Developer/usr/lib/llvm-gcc/4.2.1/include
 endif
 
 CLANG_LIBS = \
@@ -49,7 +51,7 @@ TEST_RESULTS = $(TESTS:test/%.cpp=test/.%.res)
 test: $(TEST_RESULTS)
 
 $(TESTS_PP): test/.pp.%.cpp: test/%.cpp bin/resumable-pp
-	-bin/resumable-pp $< $(PP_CXXFLAGS) > $@ 2> /dev/null
+	bin/resumable-pp $< $(PP_CXXFLAGS) > $@
 
 $(TEST_EXES): test/.%.exe: test/.pp.%.cpp
 	g++ -std=c++1y -Wall -Wno-return-type -o $@ $<

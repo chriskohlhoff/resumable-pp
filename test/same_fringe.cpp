@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <typeinfo>
 
 template <class T>
 class generator
@@ -60,7 +61,7 @@ public:
     return impl_->invoke();
   }
 
-  bool is_terminal() const
+  bool is_terminal() const noexcept
   {
     return impl_ ? impl_->is_terminal() : true;
   }
@@ -86,7 +87,7 @@ private:
     virtual ~impl_base() {}
     virtual impl_base* clone() const = 0;
     virtual T invoke() = 0;
-    virtual bool is_terminal() const = 0;
+    virtual bool is_terminal() const noexcept = 0;
     virtual const std::type_info& wanted_type() const noexcept = 0;
     virtual void* wanted() noexcept = 0;
     virtual const void* wanted() const noexcept = 0;
@@ -98,10 +99,10 @@ private:
     explicit impl(G g) : g_(g) {}
     virtual impl_base* clone() const { return new impl(g_); }
     virtual T invoke() { return g_(); }
-    virtual bool is_terminal() const { return g_.is_terminal(); }
-    virtual const std::type_info& wanted_type() const noexcept { return g_.wanted_type(); }
-    virtual void* wanted() noexcept { return g_.wanted(); }
-    virtual const void* wanted() const noexcept { return g_.wanted(); }
+    virtual bool is_terminal() const noexcept { return ::is_terminal(g_); }
+    virtual const std::type_info& wanted_type() const noexcept { return ::wanted_type(g_); }
+    virtual void* wanted() noexcept { return ::wanted(g_); }
+    virtual const void* wanted() const noexcept { return ::wanted(g_); }
     G g_;
   };
 
@@ -151,6 +152,6 @@ int main()
   root.right->left->value = 4;
 
   generator<int> g = flatten(root);
-  while (!g.is_terminal())
+  while (!is_terminal(g))
     printf("%d\n", g());
 }
