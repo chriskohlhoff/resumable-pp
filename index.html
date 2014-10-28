@@ -69,7 +69,7 @@
 {
   yield 42;
   // ...
-}
+};
 </code></pre>
 
 <p>In this implementation this keyword is optional:</p>
@@ -78,7 +78,7 @@
 {
   yield 42;
   // ...
-}
+};
 </code></pre>
 
 <p>The preprocessor will automatically search for <code>yield</code>, <code>yield from</code> and <code>return from</code> statements within a lambda. Note that you should still use the <code>resumable</code> keyword if you want to modify a captured variable (it also marks the lambda as being <code>mutable</code>).</p>
@@ -86,12 +86,12 @@
 <h4>
 <a name="yield" class="anchor" href="#yield"><span class="octicon octicon-link"></span></a>yield</h4>
 
-<p>The use of <code>yield</code> as a statement is fully supported. However, the preprocess is unable to deduce the resumable lambda's return type from just <code>yield</code>; there must be a <code>return</code> as well. If necessary, add a trailing return type:</p>
+<p>The use of <code>yield</code> as a statement is fully supported. However, the preprocessor is unable to deduce the resumable lambda's return type from just <code>yield</code>; there must be a <code>return</code> as well. If necessary, add a trailing return type:</p>
 
 <pre><code>[]() resumable -&gt; int
 {
   yield 42;
-}
+};
 </code></pre>
 
 <h4>
@@ -144,6 +144,34 @@
 <a name="use-of-unions-to-compress-the-resumable-lambda-object-layout" class="anchor" href="#use-of-unions-to-compress-the-resumable-lambda-object-layout"><span class="octicon octicon-link"></span></a>Use of unions to compress the resumable lambda object layout</h4>
 
 <p>N4244 describes how unions may be used to overlap the memory associated with different local scopes. This optimisation has not yet been implemented in the preprocessor.</p>
+
+<h4>
+<a name="non-copyable-non-movable-resumable-lambdas" class="anchor" href="#non-copyable-non-movable-resumable-lambdas"><span class="octicon octicon-link"></span></a>Non-copyable, non-movable resumable lambdas</h4>
+
+<p>As described in N4244, the presence of non-copyable local variables inhibits the generation of the copy constructor. Similarly, non-movable variables inhibit the move constructor. However, a solution has been found that permits the creation and effective use of these sorts of resumable lambdas. For example:</p>
+
+<pre><code>auto make_my_generator()
+{
+  return initializer([]
+  {
+    noncopyable nc;
+    /// ...
+  });
+}
+</code></pre>
+
+<p>The <code>initialiser</code> function extracts an object that represents the initial state of a newly constructed lambda. As this contains just the capture set, it may be freely copied if the captured variables allow copying. The initialiser has a nested typedef <code>lambda</code> that can be used to create an object to hold the lambda:</p>
+
+<pre><code>auto init(make_my_generator());
+decltype(init)::lambda f(std::move(init));
+</code></pre>
+
+<p>This step is performed automatically when using the resumable lambda with <code>yield from</code>:</p>
+
+<pre><code>yield from make_my_generator();
+</code></pre>
+
+<p>Note that presence of this non-copyable generator will still inhibit the copy constructor on the enclosing lambda.</p>
       </section>
     </div>
 
