@@ -28,6 +28,7 @@ using namespace clang::tooling;
 
 std::string allowed_path;
 bool verbose = false;
+bool line_numbers = false;
 
 //------------------------------------------------------------------------------
 // The following code is injected at the beginning of the preprocessor input.
@@ -1514,13 +1515,16 @@ private:
 
   void EmitLineNumber(std::ostream& os, SourceLocation location)
   {
-    StringRef file_name = rewriter_.getSourceMgr().getFilename(location);
-    if (file_name.data())
+    if (line_numbers)
     {
-      os << "#line ";
-      os << rewriter_.getSourceMgr().getExpansionLineNumber(location);
-      os << " \"" << file_name.data() << "\"";
-      os << "\n";
+      StringRef file_name = rewriter_.getSourceMgr().getFilename(location);
+      if (file_name.data())
+      {
+        os << "#line ";
+        os << rewriter_.getSourceMgr().getExpansionLineNumber(location);
+        os << " \"" << file_name.data() << "\"";
+        os << "\n";
+      }
     }
   }
 
@@ -1765,7 +1769,8 @@ public:
     preamble += "\n";
     preamble += "#endif // __RESUMABLE_PREAMBLE\n";
     preamble += "\n";
-    preamble += std::string("#line 1 \"") + file.data() + "\"\n";
+    if (line_numbers)
+      preamble += std::string("#line 1 \"") + file.data() + "\"\n";
     rewriter_.InsertText(rewriter_.getSourceMgr().getLocForStartOfFile(rewriter_.getSourceMgr().getMainFileID()), preamble);
     return new consumer(rewriter_);
   }
@@ -1780,14 +1785,16 @@ int main(int argc, const char* argv[])
 {
   if (argc < 2)
   {
-    std::cerr << "Usage: resumable-pp [-p <allowed_path> ] [-v] <source> [clang args]\n";
+    std::cerr << "Usage: resumable-pp [-l] [-p <allowed_path> ] [-v] <source> [clang args]\n";
     return 1;
   }
 
   int arg = 1;
   while (arg < argc && argv[arg][0] == '-')
   {
-    if (argv[arg] == std::string("-p"))
+    if (argv[arg] == std::string("-l"))
+      line_numbers = true;
+    else if (argv[arg] == std::string("-p"))
     {
       ++arg;
       if (arg < argc)
