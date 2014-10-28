@@ -1352,6 +1352,48 @@ private:
     os << "      __lambda.~__resumable_lambda_" << lambda_id_ << "();\n";
     os << "    }\n";
     os << "\n";
+    os << "    bool is_initial() const noexcept { return __lambda.is_initial(); }\n";
+    os << "    bool is_terminal() const noexcept { return __lambda.is_terminal(); }\n";
+    os << "\n";
+    os << "    const std::type_info& wanted_type() const noexcept\n";
+    os << "    {\n";
+    os << "      return __lambda.wanted_type();\n";
+    os << "    }\n";
+    os << "\n";
+    os << "    void* wanted() noexcept\n";
+    os << "    {\n";
+    os << "      return __lambda.wanted();\n";
+    os << "    }\n";
+    os << "\n";
+    os << "    const void* wanted() const noexcept\n";
+    os << "    {\n";
+    os << "      return __lambda.wanted();\n";
+    os << "    }\n";
+    os << "\n";
+    CXXMethodDecl* method = lambda_expr_->getCallOperator();
+    os << "    ";
+    if (lambda_expr_->hasExplicitResultType())
+      os << method->getReturnType().getAsString();
+    else
+      os << "auto";
+    os << " operator()(";
+    for (FunctionDecl::param_iterator p = method->param_begin(), e = method->param_end(); p != e; ++p)
+    {
+      if (p != method->param_begin())
+        os << ",";
+      os << "\n      " << (*p)->getType().getAsString() << " " << (*p)->getNameAsString();
+    }
+    os << ")\n";
+    os << "    {\n";
+    os << "      return __lambda(";
+    for (FunctionDecl::param_iterator p = method->param_begin(), e = method->param_end(); p != e; ++p)
+    {
+      if (p != method->param_begin())
+        os << ",";
+      os << "\n      static_cast<" << (*p)->getType().getAsString() << ">(" << (*p)->getNameAsString() << ")";
+    }
+    os << ");\n";
+    os << "    }\n";
     os << "    union { __resumable_lambda_" << lambda_id_ << " __lambda; };\n";
     os << "  };\n";
   }
