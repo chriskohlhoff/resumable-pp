@@ -3,6 +3,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <unistd.h>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -86,14 +87,18 @@ void check_filename(const std::string& filename)
 {
   if (!allowed_path.empty())
   {
-    if (filename.find(allowed_path) != 0)
+    char real[PATH_MAX + 1];
+    if (!realpath(filename.c_str(), real))
       exit(1);
-    if (filename.find("..") != std::string::npos)
+    std::string realname(real);
+    if (realname.find(allowed_path) != 0)
       exit(1);
-    if (filename.find_first_of("\"$&'()*;<>?[\\]`{|}~ \t\r\n") != std::string::npos)
+    if (realname.find("..") != std::string::npos)
       exit(1);
-    for (std::size_t i = 0; i < filename.length(); ++i)
-      if (!isprint(filename[i]))
+    if (realname.find_first_of("\"$&'()*;<>?[\\]`{|}~ \t\r\n") != std::string::npos)
+      exit(1);
+    for (std::size_t i = 0; i < realname.length(); ++i)
+      if (!isprint(realname[i]))
         exit(1);
   }
 }
