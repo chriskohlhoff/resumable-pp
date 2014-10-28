@@ -25,6 +25,7 @@ using namespace clang::tooling;
 
 //------------------------------------------------------------------------------
 
+std::string allowed_path;
 bool verbose = false;
 
 //------------------------------------------------------------------------------
@@ -79,6 +80,25 @@ template <class _T> using lambda_t = typename lambda<_T>::type;
 )-";
 
 //------------------------------------------------------------------------------
+// Helper function to check a filename.
+
+void check_filename(const std::string& filename)
+{
+  if (!allowed_path.empty())
+  {
+    if (filename.find(allowed_path) != 0)
+      exit(1);
+    if (filename.find("..") != std::string::npos)
+      exit(1);
+    if (filename.find_first_of("\"$&'()*;<>?[\\]`{|}~ \t\r\n") != std::string::npos)
+      exit(1);
+    for (std::size_t i = 0; i < filename.length(); ++i)
+      if (!isprint(filename[i]))
+        exit(1);
+  }
+}
+
+//------------------------------------------------------------------------------
 // Class to inject code at the beginning of the input.
 
 class code_injector : public PPCallbacks
@@ -104,6 +124,11 @@ public:
       auto buf = llvm::MemoryBuffer::getMemBuffer(injected, "resumable-pp-injected");
       loc = source_mgr.getFileLoc(loc);
       preprocessor_.EnterSourceFile(source_mgr.createFileID(buf, SrcMgr::C_User, 0, 0, loc), nullptr, loc);
+    }
+    else
+    {
+      check_filename(source_mgr.getFilename(loc));
+      check_filename(source_mgr.getFilename(source_mgr.getExpansionLoc(loc)));
     }
   }
 
@@ -1750,19 +1775,27 @@ int main(int argc, const char* argv[])
 {
   if (argc < 2)
   {
-    std::cerr << "Usage: resumable-pp [-v] <source> [clang args]\n";
+    std::cerr << "Usage: resumable-pp [-p <allowed_path> ] [-v] <source> [clang args]\n";
     return 1;
   }
 
   int arg = 1;
-  if (argv[arg] == std::string("-v"))
+  while (arg < argc && argv[arg][0] == '-')
   {
-    verbose = true;
+    if (argv[arg] == std::string("-p"))
+    {
+      ++arg;
+      if (arg < argc)
+        allowed_path = argv[arg];
+    }
+    else if (argv[arg] == std::string("-v"))
+      verbose = true;
     ++arg;
   }
 
   std::vector<std::string> files;
-  files.push_back(argv[arg++]);
+  if (arg < argc)
+    files.push_back(argv[arg++]);
 
   std::vector<std::string> args;
   args.push_back("-std=c++1y");
