@@ -125,7 +125,7 @@
 <h4>
 <a name="resumable-lambda-member-functions" class="anchor" href="#resumable-lambda-member-functions"><span class="octicon octicon-link"></span></a>Resumable lambda member functions</h4>
 
-<p>The generated code for resumable lambdas will include the member functions as described in N4244, such as <code>is_terminal()</code>. However, trying to use them will typically trigger errors in the preprocessor. This is because normal lambdas do not support these function. To work around this, free functions are also provided. So, instead of writing:</p>
+<p>The generated code for resumable lambdas will include the member functions as described in N4244, such as <code>is_terminal()</code>. However, trying to use them will typically trigger errors in the preprocessor. This is because normal lambdas do not support these functions. To work around this, free functions are also provided. So, instead of writing:</p>
 
 <pre><code>bool b = g.is_terminal();
 </code></pre>
