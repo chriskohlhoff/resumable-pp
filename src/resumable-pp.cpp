@@ -440,7 +440,7 @@ public:
     if (decl->hasLocalStorage())
     {
       int yield_id = AddYieldPoint(decl);
-      std::string type = decl->getType().getAsString();
+      std::string type = "__resumable_local_type_t<" + decl->getType().getAsString() + ">";
       std::string name = decl->getDeclName().getAsString();
       std::string full_name;
       for (int scope: curr_scope_path_)
@@ -1633,6 +1633,15 @@ public:
     preamble += "\n";
     preamble += "template <class _T>\n";
     preamble += "struct __resumable_move_disabled : _T {};\n";
+    preamble += "\n";
+    preamble += "template <class _T>\n";
+    preamble += "struct __resumable_local_type\n";
+    preamble += "{\n";
+    preamble += "  typedef _T _Type;\n";
+    preamble += "};\n";
+    preamble += "\n";
+    preamble += "template <class _T>\n";
+    preamble += "using __resumable_local_type_t = typename __resumable_local_type<_T>::_Type;\n";
     preamble += "\n";
     preamble += "template <class _T, class... _Args>\n";
     preamble += "inline void __resumable_local_new(::std::true_type, _T* __p, _Args&&... __args)\n";
