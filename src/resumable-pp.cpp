@@ -1179,7 +1179,8 @@ private:
     os << "        __resumable_copy_disabled<__resumable_lambda_" << lambda_id_ << "_locals_data>\n";
     os << "      >::type __copy_constructor_arg;\n";
     os << "\n";
-    os << "    __resumable_lambda_" << lambda_id_ << "_locals(const __copy_constructor_arg& __other)\n";
+    os << "    __resumable_lambda_" << lambda_id_ << "_locals(const __copy_constructor_arg& __other) :\n";
+    os << "      __resumable_lambda_" << lambda_id_ << "_locals_data()\n";
     os << "    {\n";
     os << "      __resumable_lambda_" << lambda_id_ << "_locals_unwinder __unwind = { this };\n";
     for (resumable_lambda_locals::iterator v = locals_.begin(), e = locals_.end(); v != e; ++v)
@@ -1219,7 +1220,8 @@ private:
     os << "        __resumable_move_disabled<__resumable_lambda_" << lambda_id_ << "_locals_data>\n";
     os << "      >::type __move_constructor_arg;\n";
     os << "\n";
-    os << "    __resumable_lambda_" << lambda_id_ << "_locals(__move_constructor_arg&& __other)\n";
+    os << "    __resumable_lambda_" << lambda_id_ << "_locals(__move_constructor_arg&& __other) :\n";
+    os << "      __resumable_lambda_" << lambda_id_ << "_locals_data()\n";
     os << "    {\n";
     os << "      __resumable_lambda_" << lambda_id_ << "_locals_unwinder __unwind = { this };\n";
     os << "      __resumable_lambda_" << lambda_id_ << "_locals_unwinder __unwind_other = { &__other };\n";
@@ -1723,7 +1725,7 @@ public:
     preamble += "}\n";
     preamble += "\n";
     preamble += "template <class _T>\n";
-    preamble += "inline void __resumable_generator_init(_T* __p)\n";
+    preamble += "inline void __resumable_generator_init(_T*)\n";
     preamble += "{\n";
     preamble += "}\n";
     preamble += "\n";
@@ -1740,7 +1742,7 @@ public:
     preamble += "}\n";
     preamble += "\n";
     preamble += "template <class _T>\n";
-    preamble += "inline void __resumable_generator_fini(_T* __p)\n";
+    preamble += "inline void __resumable_generator_fini(_T*)\n";
     preamble += "{\n";
     preamble += "}\n";
     preamble += "\n";
