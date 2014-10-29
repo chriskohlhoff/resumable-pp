@@ -624,8 +624,10 @@ private:
 
     int temp_yield_id = AddYieldPoint(temp);
 
-    std::string inner_type = rewriter_.ConvertToString(temp);
-    std::string type = "__resumable_generator_type_t<decltype(" + inner_type + ")>";
+    std::string inner_type = "typename ::std::decay<" + temp->getType().getAsString() + ">::type\n";
+    if (inner_type.find("lambda at") != std::string::npos)
+      inner_type = "decltype(" + rewriter_.ConvertToString(temp) + ")";
+    std::string type = "__resumable_generator_type_t<" + inner_type + ">";
     std::string name = "__temp" + std::to_string(temp_yield_id);
     std::string full_name;
     for (int scope: curr_scope_path_)
@@ -636,10 +638,6 @@ private:
     expr += "this->__state = " + std::to_string(temp_yield_id) + ", ";
     expr += "__resumable_generator_construct(&" + full_name + ", ";
     expr += rewriter_.getRewrittenText(SourceRange(temp->getLocStart(), temp->getLocEnd())) + ")";
-
-    /*std::string expr = "new (static_cast<void*>(&" + full_name + ")) decltype(" + full_name + ")(";
-    expr += rewriter_.getRewrittenText(SourceRange(temp->getLocStart(), temp->getLocEnd()));
-    expr += "), __state = " + std::to_string(temp_yield_id);*/
 
     iterator iter = scope_to_local_.insert(std::make_pair(curr_scope_path_, local{type, name, full_name, expr, temp_yield_id}));
     ptr_to_iter_[temp] = iter;
