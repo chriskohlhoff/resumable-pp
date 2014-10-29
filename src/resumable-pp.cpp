@@ -65,12 +65,20 @@ struct __lambda_this_t
 
 constexpr __lambda_this_t __lambda_this;
 
+template <class _T>
+struct __initializer : _T
+{
+  explicit __initializer(_T __t) : _T(static_cast<_T&&>(__t)) {}
+  typedef _T lambda;
+  typedef _T generator_type;
+};
+
 template <class _T> bool is_initial(const _T&) noexcept { return false; }
 template <class _T> bool is_terminal(const _T&) noexcept { return false; }
 template <class _T> const std::type_info& wanted_type(const _T&) noexcept { return typeid(void); }
 template <class _T> void* wanted(_T&) noexcept { return nullptr; }
 template <class _T> const void* wanted(const _T&) noexcept { return nullptr; }
-template <class _T> _T initializer(_T&& __t) { return static_cast<_T&&>(__t); }
+template <class _T> __initializer<_T> initializer(_T __t) { return __initializer<_T>(static_cast<_T&&>(__t)); }
 template <class _T> struct lambda { typedef _T type; };
 template <class _T> using lambda_t = typename lambda<_T>::type;
 
