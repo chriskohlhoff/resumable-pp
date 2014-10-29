@@ -582,7 +582,7 @@ private:
     int temp_yield_id = AddYieldPoint(temp);
 
     std::string inner_type = rewriter_.ConvertToString(temp);
-    std::string type = "__resumable_generator_type<decltype(" + inner_type + ")>::_Type";
+    std::string type = "__resumable_generator_type_t<decltype(" + inner_type + ")>";
     std::string name = "__temp" + std::to_string(temp_yield_id);
     std::string full_name;
     for (int scope: curr_scope_path_)
@@ -1663,6 +1663,9 @@ public:
     preamble += "{\n";
     preamble += "  typedef __resumable_generator<typename _T::generator_type> _Type;\n";
     preamble += "};\n";
+    preamble += "\n";
+    preamble += "template <class _T>\n";
+    preamble += "using __resumable_generator_type_t = typename __resumable_generator_type<_T>::_Type;\n";
     preamble += "\n";
     preamble += "template <class _T>\n";
     preamble += "inline void __resumable_generator_init(__resumable_generator<_T>* __p)\n";
