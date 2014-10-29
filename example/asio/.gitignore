@@ -1,0 +1,6 @@
+.pp.*
+.*.res
+.*.out
+*.dSYM
+client
+timer
