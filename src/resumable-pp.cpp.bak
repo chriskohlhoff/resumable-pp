@@ -250,18 +250,18 @@ public:
   typedef std::vector<int> scope_path;
   typedef std::map<scope_path, local>::iterator iterator;
 
-  explicit resumable_lambda_locals(Rewriter& rewriter, LambdaExpr* expr)
-    : rewriter_(rewriter), lambda_expr_(expr)
+  explicit resumable_lambda_locals(Rewriter& rewriter)
+    : rewriter_(rewriter)
   {
   }
 
-  void Build()
+  void Build(LambdaExpr* expr)
   {
     curr_scope_path_.clear();
     next_scope_id_ = 0;
     curr_yield_id_ = 1;
     curr_scope_yield_id_ = 1;
-    TraverseCompoundStmt(lambda_expr_->getBody());
+    TraverseCompoundStmt(expr->getBody());
   }
 
   iterator begin()
@@ -440,7 +440,7 @@ public:
     if (decl->hasLocalStorage())
     {
       int yield_id = AddYieldPoint(decl);
-      std::string type = "__resumable_local_type_t<" + decl->getType().getAsString() + ">";
+      std::string type = decl->getType().getAsString();
       std::string name = decl->getDeclName().getAsString();
       std::string full_name;
       for (int scope: curr_scope_path_)
@@ -511,6 +511,10 @@ public:
         return result;
       }
 
+          static int first = true;
+          assert(first == true);
+          first = false;
+
       AddYieldPoint(op);
     }
 
@@ -537,29 +541,6 @@ public:
     return result;
   }
 
-  bool TraverseCXXThisExpr(CXXThisExpr* expr)
-  {
-    bool result = RecursiveASTVisitor<resumable_lambda_locals>::TraverseCXXThisExpr(expr);
-
-    for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
-    {
-      if (c->getCaptureKind() == LCK_This)
-      {
-        if (expr->isImplicit())
-        {
-          rewriter_.InsertTextBefore(expr->getLocStart(), "this->__this->");
-        }
-        else
-        {
-          SourceRange range(expr->getLocStart(), expr->getLocEnd());
-          rewriter_.ReplaceText(range, "this->__this");
-        }
-      }
-    }
-
-    return result;
-  }
-
   bool TraverseDeclRefExpr(DeclRefExpr* expr)
   {
     bool result = RecursiveASTVisitor<resumable_lambda_locals>::TraverseDeclRefExpr(expr);
@@ -571,21 +552,9 @@ public:
     }
     else if (expr->getDecl()->getType().getAsString() == "const struct __lambda_this_t")
     {
-      auto lthis = rewriter_.getSourceMgr().getImmediateExpansionRange(expr->getLocStart());
-      SourceRange range(lthis.first, lthis.second);
+      auto yield = rewriter_.getSourceMgr().getImmediateExpansionRange(expr->getLocStart());
+      SourceRange range(yield.first, yield.second);
       rewriter_.ReplaceText(range, "this");
-    }
-    else
-    {
-      for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
-      {
-        if (c->getCapturedVar() == expr->getDecl())
-        {
-          std::string var = rewriter_.getRewrittenText(SourceRange(expr->getLocStart(), expr->getLocEnd()));
-          rewriter_.ReplaceText(SourceRange(expr->getLocStart(), expr->getLocEnd()), "this->" + var);
-          break;
-        }
-      }
     }
 
     return result;
@@ -617,7 +586,7 @@ private:
     int temp_yield_id = AddYieldPoint(temp);
 
     std::string inner_type = rewriter_.ConvertToString(temp);
-    std::string type = "__resumable_generator_type_t<decltype(" + inner_type + ")>";
+    std::string type = "__resumable_generator_type<decltype(" + inner_type + ")>::_Type";
     std::string name = "__temp" + std::to_string(temp_yield_id);
     std::string full_name;
     for (int scope: curr_scope_path_)
@@ -652,7 +621,6 @@ private:
   }
 
   Rewriter& rewriter_;
-  LambdaExpr* lambda_expr_ = nullptr;
   scope_path curr_scope_path_;
   int next_scope_id_;
   int curr_yield_id_;
@@ -678,7 +646,7 @@ public:
     : rewriter_(r),
       lambda_expr_(expr),
       lambda_id_(next_lambda_id_++),
-      locals_(r, expr)
+      locals_(r)
   {
   }
 
@@ -687,7 +655,7 @@ public:
     if (!resumable_lambda_detector().IsResumable(lambda_expr_))
       return;
 
-    locals_.Build();
+    locals_.Build(lambda_expr_);
     CompoundStmt* body = lambda_expr_->getBody();
     SourceRange beforeBody(lambda_expr_->getLocStart(), body->getLocStart());
     SourceRange afterBody(body->getLocEnd(), lambda_expr_->getLocEnd());
@@ -723,8 +691,8 @@ public:
     before << "\n";
     before << "    ~__resumable_lambda_" << lambda_id_ << "_locals_unwinder()\n";
     before << "    {\n";
-    before << "      if (this->__locals)\n";
-    before << "        this->__locals->__unwind_to(-1);\n";
+    before << "      if (__locals)\n";
+    before << "        __locals->__unwind_to(-1);\n";
     before << "    }\n";
     before << "  };\n";
     before << "\n";
@@ -836,6 +804,27 @@ public:
     }
 
     return result;
+  }
+
+  bool VisitCXXThisExpr(CXXThisExpr* expr)
+  {
+    for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
+    {
+      if (c->getCaptureKind() == LCK_This)
+      {
+        if (expr->isImplicit())
+        {
+          rewriter_.InsertTextBefore(expr->getLocStart(), "__this->");
+        }
+        else
+        {
+          SourceRange range(expr->getLocStart(), expr->getLocEnd());
+          rewriter_.ReplaceText(range, "__this");
+        }
+      }
+    }
+
+    return true;
   }
 
   bool TraverseConditionalOperator(ConditionalOperator* op)
@@ -1656,15 +1645,6 @@ public:
     preamble += "template <class _T>\n";
     preamble += "struct __resumable_move_disabled : _T {};\n";
     preamble += "\n";
-    preamble += "template <class _T>\n";
-    preamble += "struct __resumable_local_type\n";
-    preamble += "{\n";
-    preamble += "  typedef _T _Type;\n";
-    preamble += "};\n";
-    preamble += "\n";
-    preamble += "template <class _T>\n";
-    preamble += "using __resumable_local_type_t = typename __resumable_local_type<_T>::_Type;\n";
-    preamble += "\n";
     preamble += "template <class _T, class... _Args>\n";
     preamble += "inline void __resumable_local_new(::std::true_type, _T* __p, _Args&&... __args)\n";
     preamble += "{\n";
@@ -1694,9 +1674,6 @@ public:
     preamble += "{\n";
     preamble += "  typedef __resumable_generator<typename _T::generator_type> _Type;\n";
     preamble += "};\n";
-    preamble += "\n";
-    preamble += "template <class _T>\n";
-    preamble += "using __resumable_generator_type_t = typename __resumable_generator_type<_T>::_Type;\n";
     preamble += "\n";
     preamble += "template <class _T>\n";
     preamble += "inline void __resumable_generator_init(__resumable_generator<_T>* __p)\n";

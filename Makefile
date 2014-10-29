@@ -1,3 +1,7 @@
+ifndef CXX
+CXX = g++
+endif
+
 LLVM_CXXFLAGS := `llvm-config-3.5 --cxxflags`
 
 LLVM_LDFLAGS := `llvm-config-3.5 --ldflags --libs --system-libs`
@@ -39,7 +43,7 @@ CLANG_LIBS = \
 	$(END_GROUP)
 
 bin/resumable-pp: src/resumable-pp.cpp
-	g++ -std=c++11 -Wall -Wno-strict-aliasing $(LLVM_CXXFLAGS) -o $@ $< $(CLANG_LIBS) $(LLVM_LDFLAGS)
+	$(CXX) -std=c++11 -Wall -Wno-strict-aliasing $(LLVM_CXXFLAGS) -o $@ $< $(CLANG_LIBS) $(LLVM_LDFLAGS)
 
 TESTS = $(wildcard test/*.cpp)
 TESTS_PP = $(TESTS:test/%.cpp=test/.pp.%.cpp)
@@ -54,7 +58,7 @@ $(TESTS_PP): test/.pp.%.cpp: test/%.cpp bin/resumable-pp
 	bin/resumable-pp $< $(PP_CXXFLAGS) > $@
 
 $(TEST_EXES): test/.%.exe: test/.pp.%.cpp
-	g++ -std=c++1y -Wall -Wno-return-type -o $@ $<
+	$(CXX) -std=c++1y -Wall -Wno-return-type -o $@ $<
 
 $(TEST_OUTPUTS): test/.%.out: test/.%.exe
 	$< > $@
