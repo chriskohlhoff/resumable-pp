@@ -448,7 +448,10 @@ public:
     if (decl->hasLocalStorage())
     {
       int yield_id = AddYieldPoint(decl);
-      std::string type = "__resumable_local_type_t<" + decl->getType().getAsString() + ">";
+      std::string inner_type = decl->getType().getAsString();
+      if (inner_type.find("class ") == 0) inner_type = inner_type.substr(6);
+      if (inner_type.find("struct ") == 0) inner_type = inner_type.substr(7);
+      std::string type = "__resumable_local_type_t<" + inner_type + ">";
       std::string name = decl->getDeclName().getAsString();
       std::string full_name;
       for (int scope: curr_scope_path_)
