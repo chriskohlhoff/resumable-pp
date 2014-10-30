@@ -9,7 +9,7 @@ int main()
 {
   asio::io_service io_service;
 
-  go([&](coro&& c) {
+  go([&](coro& c) {
       asio::steady_timer timer(io_service);
       for (int i = 0; i < 10; ++i)
       {

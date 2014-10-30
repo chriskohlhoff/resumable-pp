@@ -14,7 +14,7 @@ int main()
   asio::io_service io_service;
 
   std::size_t total = 64;
-  go([&, total](coro&& c) {
+  go([&, total](coro& c) {
       char buf[64 * 1024];
       tcp::socket conn(io_service);
       yield from conn.async_connect({address_v4::loopback(), 13375}, c);

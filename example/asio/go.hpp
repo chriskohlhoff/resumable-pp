@@ -21,7 +21,7 @@ private:
   {
     virtual ~impl_base() {}
     virtual void* wanted() = 0;
-    void (*resume_)(coro);
+    void (*resume_)(coro&);
   };
 
   template <class F>
@@ -38,9 +38,10 @@ private:
       return ::wanted(f_);
     }
 
-    static void resume(coro c)
+    static void resume(coro& c)
     {
-      static_cast<impl*>(c.impl_.get())->f_(std::move(c));
+      do static_cast<impl*>(c.impl_.get())->f_(c);
+      while (c.impl_ && !is_terminal(static_cast<impl*>(c.impl_.get())->f_));
     }
 
     typename F::lambda f_;
@@ -55,7 +56,7 @@ template <class F>
 void go(F&& f)
 {
   coro c(initializer(std::move(f)));
-  c.impl_->resume_(std::move(c));
+  c.impl_->resume_(c);
 }
 
 struct async_generator_init
@@ -122,7 +123,7 @@ public:
   void operator()(Args...)
   {
     static_cast<async_generator*>(coro_.impl_->wanted())->state_ = async_generator::ready;
-    coro_.impl_->resume_(std::move(coro_));
+    coro_.impl_->resume_(coro_);
   }
 
 private:
@@ -142,7 +143,7 @@ public:
   {
     static_cast<async_generator*>(coro_.impl_->wanted())->ex_ = ex;
     static_cast<async_generator*>(coro_.impl_->wanted())->state_ = async_generator::ready;
-    coro_.impl_->resume_(std::move(coro_));
+    coro_.impl_->resume_(coro_);
   }
 
 private:
@@ -166,7 +167,7 @@ public:
       static_cast<async_generator*>(coro_.impl_->wanted())->ex_ = std::make_exception_ptr(ex);
     }
     static_cast<async_generator*>(coro_.impl_->wanted())->state_ = async_generator::ready;
-    coro_.impl_->resume_(std::move(coro_));
+    coro_.impl_->resume_(coro_);
   }
 
 private:
