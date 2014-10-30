@@ -36,6 +36,7 @@ bool line_numbers = false;
 const char injected[] = R"-(
 
 #include <typeinfo>
+#include <type_traits>
 
 template <class>
 struct __resumable_check { typedef void _Type; };
