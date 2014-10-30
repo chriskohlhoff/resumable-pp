@@ -37,11 +37,37 @@ const char injected[] = R"-(
 
 #include <typeinfo>
 
+template <class>
+struct __resumable_check { typedef void _Type; };
+
+template <class _T, class = void>
+struct __resumable_generator_type
+{
+  typedef _T _Type;
+};
+
+template <class _T>
+struct __resumable_generator_type<_T,
+  typename __resumable_check<typename _T::generator_type>::_Type>
+{
+  typedef typename _T::generator_type _Type;
+};
+
+template <class _T>
+using __resumable_generator_type_t = typename __resumable_generator_type<_T>::_Type;
+
+template <class _T>
+struct __resumable_generator_result
+{
+  template <class T> operator T() const;
+};
+
 struct __yield_t
 {
   constexpr __yield_t() {}
   template <class T> operator T() const;
-  template <class T> __yield_t operator&(const T&) const { return {}; }
+  template <class T> T&& operator=(T&& t) const { return static_cast<T&&>(t); }
+  template <class T> T operator=(__resumable_generator_result<T>) const;
 };
 
 constexpr __yield_t __yield;
@@ -50,7 +76,9 @@ struct __from_t
 {
   constexpr __from_t() {}
   template <class T> operator T() const;
-  template <class T> __from_t operator&(const T&) const { return {}; }
+  template <class T> __resumable_generator_result<
+    decltype(::std::declval<__resumable_generator_type_t<T>>()())>
+      operator=(T&& t) const { return {}; }
 };
 
 constexpr __from_t __from;
@@ -83,8 +111,8 @@ template <class _T> struct lambda { typedef _T type; };
 template <class _T> using lambda_t = typename lambda<_T>::type;
 
 #define resumable __attribute__((__annotate__("resumable"))) mutable
-#define yield 0 ? throw __yield : throw
-#define from __from&
+#define yield 0 ? throw __yield : __yield=
+#define from __from=
 #define lambda_this __lambda_this
 
 )-";
@@ -160,8 +188,15 @@ Expr* IsYieldKeyword(Stmt* stmt)
       if (CXXThrowExpr* true_throw_expr = dyn_cast<CXXThrowExpr>(op->getTrueExpr()))
         if (CXXConstructExpr* construct_expr = dyn_cast<CXXConstructExpr>(true_throw_expr->getSubExpr()))
           if (construct_expr->getType().getAsString() == "struct __yield_t")
-            if (CXXThrowExpr* false_throw_expr = dyn_cast<CXXThrowExpr>(op->getFalseExpr()))
-              return false_throw_expr->getSubExpr();
+          {
+            if (CXXOperatorCallExpr* call_expr = dyn_cast<CXXOperatorCallExpr>(op->getFalseExpr()))
+              if (call_expr->getNumArgs() == 2)
+                if (call_expr->getArg(0)->getType().getAsString() == "const struct __yield_t")
+                  return call_expr->getArg(1);
+            if (BinaryOperator* bin_op = dyn_cast<BinaryOperator>(op->getFalseExpr()))
+                if (bin_op->getLHS()->getType().getAsString() == "const struct __yield_t")
+                  return bin_op->getRHS();
+          }
   return nullptr;
 }
 
