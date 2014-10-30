@@ -15,6 +15,14 @@ PP_CXXFLAGS = \
 CXXFLAGS = -I$(ASIO_ROOT)/include -DASIO_STANDALONE
 endif
 
+ifeq ($(OS_ARCH),Linux)
+PP_CXXFLAGS = \
+  -stdlib=libc++ -I/usr/lib/gcc/x86_64-linux-gnu/4.9/include-fixed \
+  -I$(ASIO_ROOT)/include -DASIO_STANDALONE
+
+CXXFLAGS = -I$(ASIO_ROOT)/include -DASIO_STANDALONE -lpthread
+endif
+
 EXAMPLES = $(wildcard *.cpp)
 EXAMPLES_PP = $(EXAMPLES:%.cpp=.pp.%.cpp)
 EXAMPLE_EXES = $(EXAMPLES:%.cpp=%)
@@ -25,7 +33,7 @@ all: $(EXAMPLE_EXES)
 $(EXAMPLES_PP): .pp.%.cpp: %.cpp
 	$(DEPTH)/bin/resumable-pp $< $(PP_CXXFLAGS) > $@
 
-$(EXAMPLE_EXES): %: .pp.%.cpp
+$(EXAMPLE_EXES): %: .pp.%.cpp go.hpp
 	$(CXX) -std=c++1y -Wall -Wno-return-type $(CXXFLAGS) -o $@ $<
 
 clean:
