@@ -627,7 +627,7 @@ private:
 
     int temp_yield_id = AddYieldPoint(temp);
 
-    std::string inner_type = "typename ::std::decay<" + temp->getType().getAsString() + ">::type\n";
+    std::string inner_type = "typename ::std::decay<" + temp->getType().getAsString() + ">::type";
     if (inner_type.find("lambda at") != std::string::npos)
       inner_type = "decltype(" + rewriter_.ConvertToString(temp) + ")";
     std::string type = "__resumable_generator_type_t<" + inner_type + ">";
@@ -883,7 +883,8 @@ public:
         os << "              auto& __g = " << expr.substr(0, expr.length() - 1) << ";\n";
         os << "              if (__g.is_terminal()) break;\n";
         os << "              __unwind.__locals = nullptr;\n";
-        os << "              return __g();\n";
+        os << "              __resumable_generator_invoke<decltype(__g), decltype(__g())> __ret(__g);\n";
+        os << "              return __ret.__get();\n";
         os << "            }\n";
         if (dyn_cast<MaterializeTemporaryExpr>(after_from))
           os << "          case " << yield_point - 1 << ":\n";
@@ -957,10 +958,10 @@ public:
       os << "            {\n";
       os << "              auto& __g = " << expr.substr(0, expr.length() - 1) << ";\n";
       os << "              __unwind.__locals = nullptr;\n";
-      os << "              auto __ret(__g());\n";
+      os << "              __resumable_generator_invoke<decltype(__g), decltype(__g())> __ret(__g);\n";
       os << "              if (__g.is_terminal())\n";
       os << "                this->__state = -1;\n";
-      os << "              return __ret;\n";
+      os << "              return __ret.__get();\n";
       os << "            }\n";
       if (dyn_cast<MaterializeTemporaryExpr>(after_from))
         os << "          case " << yield_point - 1 << ":\n";
@@ -1754,6 +1755,21 @@ public:
     preamble += "inline void __resumable_generator_fini(_T*)\n";
     preamble += "{\n";
     preamble += "}\n";
+    preamble += "\n";
+    preamble += "template <class _T, class _Result>\n";
+    preamble += "struct __resumable_generator_invoke\n";
+    preamble += "{\n";
+    preamble += "  _Result __result;\n";
+    preamble += "  explicit __resumable_generator_invoke(_T& __t) : __result(__t()) {}\n";
+    preamble += "  _Result __get() { return static_cast<_Result&&>(__result); }\n";
+    preamble += "};\n";
+    preamble += "\n";
+    preamble += "template <class _T>\n";
+    preamble += "struct __resumable_generator_invoke<_T, void>\n";
+    preamble += "{\n";
+    preamble += "  explicit __resumable_generator_invoke(_T& __t) { __t(); }\n";
+    preamble += "  void __get() {}\n";
+    preamble += "};\n";
     preamble += "\n";
     preamble += "template <class _T>\n";
     preamble += "inline bool is_initial(const _T& __t,\n";
