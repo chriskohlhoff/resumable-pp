@@ -64,7 +64,8 @@ $(TEST_OUTPUTS): test/.%.out: test/.%.exe
 	$< > $@
 
 $(TEST_RESULTS): test/.%.res: test/.%.out
-	diff $< $(subst .res,.expected,$(subst test/.,test/,$@)) | tee $@
+	@-diff $< $(subst .res,.expected,$(subst test/.,test/,$@)) > $@
+	diff $< $(subst .res,.expected,$(subst test/.,test/,$@))
 	@echo ====== PASSED ======
 
 clean:
