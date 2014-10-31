@@ -1031,7 +1031,7 @@ private:
       {
         std::string name = c->getCapturedVar()->getDeclName().getAsString();
         std::string init = rewriter_.ConvertToString(c->getCapturedVar()->getInit());
-        os << "  typedef decltype(" << init << ")";
+        os << "  typedef ::std::decay<decltype(" << init << ")>::type";
         os << " __resumable_lambda_" << lambda_id_ << "_" << name << "_type;\n";
       }
       else
