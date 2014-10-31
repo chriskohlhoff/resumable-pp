@@ -3,4 +3,5 @@
 .*.out
 *.dSYM
 client
+server
 timer

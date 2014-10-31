@@ -376,6 +376,11 @@ public:
     return is_reachable_yield_.count(std::make_pair(from_yield_id, to_yield_id)) > 0;
   }
 
+  bool hasVoidReturn() const
+  {
+    return has_void_return_;
+  }
+
   bool TraverseCompoundStmt(CompoundStmt* stmt)
   {
     int curr_scope_id = next_scope_id_;
@@ -385,7 +390,13 @@ public:
     ptr_to_yield_[stmt] = enclosing_scope_yield_id;
 
     for (CompoundStmt::body_iterator b = stmt->body_begin(), e = stmt->body_end(); b != e; ++b)
+    {
       TraverseStmt(*b);
+      if (BinaryOperator* bin_op = dyn_cast<BinaryOperator>(*b))
+        if (bin_op->isAssignmentOp())
+          if (IsYieldKeyword(bin_op->getRHS()))
+            has_void_return_ = true;
+    }
 
     curr_scope_yield_id_ = enclosing_scope_yield_id;
     curr_scope_path_.pop_back();
@@ -543,6 +554,9 @@ public:
 
     if (Expr* after_yield = IsYieldKeyword(op))
     {
+      if (op->getType()->isVoidType())
+        has_void_return_ = true;
+
       if (Expr* after_from = IsFromKeyword(after_yield))
       {
         if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(after_from))
@@ -570,6 +584,9 @@ public:
 
     if (Expr* after_from = IsFromKeyword(stmt->getRetValue()))
     {
+      if (stmt->getRetValue()->getType()->isVoidType())
+        has_void_return_ = true;
+
       if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(after_from))
       {
         AddGenerator(stmt, temp);
@@ -709,6 +726,7 @@ private:
   std::unordered_map<int, int> yield_to_prior_yield_;
   std::set<std::pair<int, int>> is_reachable_yield_;
   std::unordered_map<int, std::string> yield_to_subgen_;
+  bool has_void_return_ = false;
 };
 
 //------------------------------------------------------------------------------
@@ -852,7 +870,71 @@ public:
       rewriter_.InsertTextBefore(stmt->getLocStart(), "{");
     }
 
-    bool result = RecursiveASTVisitor<resumable_lambda_codegen>::TraverseCompoundStmt(stmt);
+    for (CompoundStmt::body_iterator b = stmt->body_begin(), e = stmt->body_end(); b != e; ++b)
+    {
+      if (BinaryOperator* bin_op = dyn_cast<BinaryOperator>(*b))
+      {
+        if (bin_op->isAssignmentOp())
+        {
+          if (Expr* after_yield = IsYieldKeyword(bin_op->getRHS()))
+          {
+            if (Expr* after_from = IsFromKeyword(after_yield))
+            {
+              SourceRange target_range(bin_op->getLHS()->getLocStart(), bin_op->getOperatorLoc());
+              SourceRange expr_range(after_from->getLocStart(), Lexer::getLocForEndOfToken(after_from->getLocEnd(), 0, rewriter_.getSourceMgr(), rewriter_.getLangOpts()));
+              std::string expr = rewriter_.getRewrittenText(expr_range);
+
+              int yield_point = locals_.getYieldId(bin_op->getRHS());
+
+              std::stringstream os;
+              os << "\n";
+              os << "        do\n";
+              os << "        {\n";
+              if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(after_from))
+              {
+                resumable_lambda_locals::iterator iter = locals_.find(temp);
+                if (iter != locals_.end() && !iter->second.generator_expr.empty())
+                {
+                  EmitLineNumber(os, after_from->getLocStart());
+                  os << "          " << iter->second.generator_expr << ";\n";
+                }
+              }
+              os << "          this->__state = " << yield_point << ";\n";
+              os << "          for (;;)\n";
+              os << "          {\n";
+              os << "            {\n";
+              EmitLineNumber(os, after_from->getLocStart());
+              os << "              auto& __g = " << expr.substr(0, expr.length() - 1) << ";\n";
+              os << "              if (__g.is_terminal()) break;\n";
+              os << "              __unwind.__locals = nullptr;\n";
+              os << "              __resumable_generator_invoke<decltype(__g), decltype(__g())> __ret(__g);\n";
+              os << "              " << rewriter_.getRewrittenText(target_range) << " __ret.__get();\n";
+              os << "              return;\n";
+              os << "            }\n";
+              if (dyn_cast<MaterializeTemporaryExpr>(after_from))
+                os << "          case " << yield_point - 1 << ":\n";
+              os << "          case " << yield_point << ":\n";
+              os << "            (void)0;\n";
+              os << "          }\n";
+              if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(after_from))
+                os << "          this->__unwind_to(" << locals_.getPriorYieldId(locals_.getYieldId(temp)) << ");\n";
+              os << "        } while (false)" << expr.back();
+
+              rewriter_.RemoveText(target_range);
+              rewriter_.ReplaceText(expr_range, os.str());
+              auto macro = rewriter_.getSourceMgr().getImmediateExpansionRange(bin_op->getRHS()->getLocStart());
+              rewriter_.ReplaceText(SourceRange(macro.first, macro.second), "/*yield*/");
+              macro = rewriter_.getSourceMgr().getImmediateExpansionRange(after_yield->getLocStart());
+              rewriter_.ReplaceText(SourceRange(macro.first, macro.second), "/*from*/");
+
+              continue;
+            }
+          }
+        }
+      }
+
+      TraverseStmt(*b);
+    }
 
     if (stmt != lambda_expr_->getBody())
     {
@@ -861,7 +943,7 @@ public:
       rewriter_.InsertTextAfter(end, unwind);
     }
 
-    return result;
+    return true;
   }
 
   bool TraverseForStmt(ForStmt* stmt)
@@ -1186,9 +1268,10 @@ private:
           os << "            __resumable_generator_fini(&" + name + ");\n";
         }
         os << "            this->__state = " << prior_yield_id << ";\n";
+        os << "            break;\n";
         os << "          }\n";
       }
-      if (prior_yield_id != yield_id - 1)
+      else if (prior_yield_id != yield_id - 1)
       {
         os << "          this->__state = " << prior_yield_id << ";\n";
         os << "          break;\n";
@@ -1363,6 +1446,8 @@ private:
     os << "    ";
     if (lambda_expr_->hasExplicitResultType())
       os << method->getReturnType().getAsString();
+    else if (locals_.hasVoidReturn())
+      os << "void";
     else
       os << "auto";
     os << " operator()(";
@@ -1479,6 +1564,8 @@ private:
     os << "    ";
     if (lambda_expr_->hasExplicitResultType())
       os << method->getReturnType().getAsString();
+    else if (locals_.hasVoidReturn())
+      os << "void";
     else
       os << "auto";
     os << " operator()(";

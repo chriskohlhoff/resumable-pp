@@ -5,6 +5,7 @@
 #include <asio/handler_type.hpp>
 #include <exception>
 #include <memory>
+#include <tuple>
 #include <type_traits>
 
 class coro
@@ -59,11 +60,56 @@ void go(F&& f)
   c.impl_->resume_(c);
 }
 
+template <class... Args>
+class async_generator;
+
+template <class... Args>
 struct async_generator_init
 {
-  typedef class async_generator generator_type;
+  typedef async_generator<Args...> generator_type;
 };
 
+template <class... Args>
+inline std::tuple<Args...> get_result(const std::tuple<Args...>& result)
+{
+  return result;
+}
+
+template <class Arg>
+inline std::tuple<Arg> get_result(const std::tuple<Arg>& result)
+{
+  return std::get<0>(result);
+}
+
+inline void get_result(const std::tuple<std::exception_ptr>& result)
+{
+  if (std::get<0>(result))
+    std::rethrow_exception(std::get<0>(result));
+}
+
+inline void get_result(const std::tuple<std::error_code>& result)
+{
+  if (std::get<0>(result))
+    throw std::system_error(std::get<0>(result));
+}
+
+template <class Arg>
+inline Arg get_result(const std::tuple<std::exception_ptr, Arg>& result)
+{
+  if (std::get<0>(result))
+    std::rethrow_exception(std::get<0>(result));
+  return std::get<1>(result);
+}
+
+template <class Arg>
+inline Arg get_result(const std::tuple<std::error_code, Arg>& result)
+{
+  if (std::get<0>(result))
+    throw std::system_error(std::get<0>(result));
+  return std::get<1>(result);
+}
+
+template <class... Args>
 class async_generator
 {
 public:
@@ -73,16 +119,14 @@ public:
   async_generator& operator=(const async_generator&) = delete;
   async_generator& operator=(async_generator&&) = delete;
 
-  void construct(async_generator_init&&) {}
+  void construct(async_generator_init<Args...>&&) {}
   void destroy() {}
 
-  void operator()()
+  auto operator()()
   {
     if (state_ == ready)
-    {
       state_ = terminal;
-      if (ex_) std::rethrow_exception(ex_);
-    }
+    return get_result(result_);
   }
 
   bool is_terminal() const noexcept
@@ -108,7 +152,7 @@ public:
 private:
   template <class...> friend class coro_handler;
   enum { initial, ready, terminal } state_ = initial;
-  std::exception_ptr ex_;
+  std::tuple<typename std::decay<Args>::type...> result_;
 };
 
 template <class... Args>
@@ -120,53 +164,10 @@ public:
   {
   }
 
-  void operator()(Args...)
+  void operator()(Args... args)
   {
-    static_cast<async_generator*>(coro_.impl_->wanted())->state_ = async_generator::ready;
-    coro_.impl_->resume_(coro_);
-  }
-
-private:
-  coro coro_;
-};
-
-template <class... Args>
-class coro_handler<std::exception_ptr, Args...>
-{
-public:
-  explicit coro_handler(coro& c)
-    : coro_(std::move(c))
-  {
-  }
-
-  void operator()(std::exception_ptr ex, Args...)
-  {
-    static_cast<async_generator*>(coro_.impl_->wanted())->ex_ = ex;
-    static_cast<async_generator*>(coro_.impl_->wanted())->state_ = async_generator::ready;
-    coro_.impl_->resume_(coro_);
-  }
-
-private:
-  coro coro_;
-};
-
-template <class... Args>
-class coro_handler<std::error_code, Args...>
-{
-public:
-  explicit coro_handler(coro& c)
-    : coro_(std::move(c))
-  {
-  }
-
-  void operator()(std::error_code ec, Args...)
-  {
-    if (ec)
-    {
-      std::system_error ex(ec);
-      static_cast<async_generator*>(coro_.impl_->wanted())->ex_ = std::make_exception_ptr(ex);
-    }
-    static_cast<async_generator*>(coro_.impl_->wanted())->state_ = async_generator::ready;
+    static_cast<async_generator<Args...>*>(coro_.impl_->wanted())->result_ = std::make_tuple(args...);
+    static_cast<async_generator<Args...>*>(coro_.impl_->wanted())->state_ = async_generator<Args...>::ready;
     coro_.impl_->resume_(coro_);
   }
 
@@ -185,7 +186,7 @@ struct handler_type<coro, R(Args...)>
 template <class... Args>
 struct async_result<coro_handler<Args...>>
 {
-  typedef async_generator_init type;
+  typedef async_generator_init<Args...> type;
   explicit async_result(coro_handler<Args...>&) {}
   type get() { return {}; }
 };
