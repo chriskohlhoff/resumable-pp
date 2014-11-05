@@ -36,5 +36,16 @@ int main()
       }
     });
 
-  io_service.run();
+  for (;;)
+  {
+    try
+    {
+      io_service.run();
+      break; // Run exited normally.
+    }
+    catch (std::exception&)
+    {
+      // Ignore and resume running the io_service.
+    }
+  }
 }
