@@ -5,6 +5,7 @@
 #include <string>
 #include <unistd.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 #include "clang/AST/AST.h"
@@ -35,86 +36,31 @@ bool line_numbers = false;
 
 const char injected[] = R"-(
 
-#include <typeinfo>
-#include <type_traits>
-
-template <class>
-struct __resumable_check { typedef void _Type; };
-
-template <class _T, class = void>
-struct __resumable_generator_type
+struct __co_yield_t
 {
-  typedef _T _Type;
-};
-
-template <class _T>
-struct __resumable_generator_type<_T,
-  typename __resumable_check<typename _T::generator_type>::_Type>
-{
-  typedef typename _T::generator_type _Type;
-};
-
-template <class _T>
-using __resumable_generator_type_t = typename __resumable_generator_type<_T>::_Type;
-
-template <class _T>
-struct __resumable_generator_result
-{
-  template <class T> operator T() const;
-};
-
-struct __yield_t
-{
-  constexpr __yield_t() {}
+  constexpr __co_yield_t() {}
   template <class T> operator T() const;
   template <class T> T&& operator=(T&& t) const { return static_cast<T&&>(t); }
-  template <class T> T operator=(__resumable_generator_result<T>) const;
 };
 
-constexpr __yield_t __yield;
-
-struct __from_t
-{
-  constexpr __from_t() {}
-  template <class T> operator T() const;
-  template <class T> __resumable_generator_result<
-    decltype(::std::declval<__resumable_generator_type_t<T>>()())>
-      operator=(T&& t) const { return {}; }
-};
-
-constexpr __from_t __from;
-
-struct __lambda_this_t
-{
-  constexpr __lambda_this_t() {}
-  template <class T> operator T() const;
-  __lambda_this_t operator*() const;
-  void operator()() const;
-};
-
-constexpr __lambda_this_t __lambda_this;
+constexpr __co_yield_t __co_yield;
 
 template <class _T>
 struct __initializer : _T
 {
   explicit __initializer(_T __t) : _T(static_cast<_T&&>(__t)) {}
   typedef _T lambda;
-  typedef _T generator_type;
 };
 
-template <class _T> bool is_initial(const _T&) noexcept { return false; }
-template <class _T> bool is_terminal(const _T&) noexcept { return false; }
-template <class _T> const std::type_info& wanted_type(const _T&) noexcept { return typeid(void); }
-template <class _T> void* wanted(_T&) noexcept { return nullptr; }
-template <class _T> const void* wanted(const _T&) noexcept { return nullptr; }
-template <class _T> __initializer<_T> initializer(_T __t) { return __initializer<_T>(static_cast<_T&&>(__t)); }
-template <class _T> struct lambda { typedef _T type; };
-template <class _T> using lambda_t = typename lambda<_T>::type;
+template <class _T> bool ready(const _T&) noexcept { return false; }
+template <class _T> auto resume(_T& __t) { return __t(); }
+template <class _T> __initializer<_T> lambda_initializer(_T __t) { return __initializer<_T>(static_cast<_T&&>(__t)); }
+template <class _T> using initializer_lambda = typename _T::lambda;
 
-#define resumable __attribute__((__annotate__("resumable"))) mutable
-#define yield 0 ? throw __yield : __yield=
-#define from __from=
-#define lambda_this __lambda_this
+#define resumable () __attribute__((__annotate__("resumable"))) mutable
+#define co_yield for ((void)__co_yield;;)
+#define co_suspend for ((void)__co_yield;;)
+#define break_resumable for ((void)__co_yield;;)
 
 )-";
 
@@ -182,96 +128,146 @@ private:
 //------------------------------------------------------------------------------
 // Helper function to detect whether an AST node is a "yield" keyword.
 
-Expr* IsYieldKeyword(Stmt* stmt)
+bool IsYieldKeyword(Stmt* stmt)
 {
-  if (ConditionalOperator* op = dyn_cast<ConditionalOperator>(stmt))
-    if (op->getLocStart().isMacroID())
-      if (CXXThrowExpr* true_throw_expr = dyn_cast<CXXThrowExpr>(op->getTrueExpr()))
-        if (CXXConstructExpr* construct_expr = dyn_cast<CXXConstructExpr>(true_throw_expr->getSubExpr()))
-          if (construct_expr->getType().getAsString() == "struct __yield_t")
-          {
-            if (CXXOperatorCallExpr* call_expr = dyn_cast<CXXOperatorCallExpr>(op->getFalseExpr()))
-              if (call_expr->getNumArgs() == 2)
-                if (call_expr->getArg(0)->getType().getAsString() == "const struct __yield_t")
-                  return call_expr->getArg(1);
-            if (BinaryOperator* bin_op = dyn_cast<BinaryOperator>(op->getFalseExpr()))
-                if (bin_op->getLHS()->getType().getAsString() == "const struct __yield_t")
-                  return bin_op->getRHS();
-          }
-  return nullptr;
+  if (ForStmt* for_stmt = dyn_cast<ForStmt>(stmt))
+    if (for_stmt->getInit())
+      if (CStyleCastExpr* cast_expr = dyn_cast<CStyleCastExpr>(for_stmt->getInit()))
+        if (DeclRefExpr* decl = dyn_cast<DeclRefExpr>(cast_expr->getSubExpr()))
+          if (decl->getType().getAsString() == "const struct __co_yield_t")
+              return true;
+  return false;
 }
 
 //------------------------------------------------------------------------------
-// Helper function to detect whether an AST node is a "from" keyword.
+// Class used to visit AST to find all functions that are resumable.
 
-Expr* IsFromKeyword(Stmt* stmt)
-{
-  if (ExprWithCleanups* expr = dyn_cast<ExprWithCleanups>(stmt))
-    stmt = expr->getSubExpr();
-  if (CXXConstructExpr* construct_expr = dyn_cast<CXXConstructExpr>(stmt))
-    if (construct_expr->getNumArgs() == 1)
-      if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(construct_expr->getArg(0)))
-        if (CXXOperatorCallExpr* call_expr = dyn_cast<CXXOperatorCallExpr>(temp->getTemporary()))
-          if (call_expr->getNumArgs() == 2)
-            if (call_expr->getArg(0)->getType().getAsString() == "const struct __from_t")
-              return call_expr->getArg(1);
-  if (ImplicitCastExpr* cast_expr = dyn_cast<ImplicitCastExpr>(stmt))
-    if (CXXMemberCallExpr* call_expr = dyn_cast<CXXMemberCallExpr>(cast_expr->getSubExpr()))
-      if (MemberExpr* member_expr = dyn_cast<MemberExpr>(call_expr->getCallee()))
-        if (ImplicitCastExpr* cast_expr_2 = dyn_cast<ImplicitCastExpr>(member_expr->getBase()))
-          if (CXXOperatorCallExpr* call_expr = dyn_cast<CXXOperatorCallExpr>(cast_expr_2->getSubExpr()))
-            if (call_expr->getNumArgs() == 2)
-              if (call_expr->getArg(0)->getType().getAsString() == "const struct __from_t")
-                return call_expr->getArg(1);
-  return nullptr;
-}
-
-//------------------------------------------------------------------------------
-// Class to determine whether a lambda is a recursive lambda based on:
-// - Being explicitly marked "resumable"
-// - Using "yield", "yield from" or "return from" in the body.
-
-class resumable_lambda_detector :
-  public RecursiveASTVisitor<resumable_lambda_detector>
+class resumable_function_detector :
+  public RecursiveASTVisitor<resumable_function_detector>
 {
 public:
-  bool IsResumable(LambdaExpr* expr)
+  explicit resumable_function_detector(SourceManager& mgr)
+    : source_manager_(mgr)
   {
-    AnnotateAttr* attr = expr->getCallOperator()->getAttr<AnnotateAttr>();
-    if (attr && attr->getAnnotation() == "resumable")
-      return true;
+  }
 
-    is_resumable_ = false;
-    nesting_level_ = 0;
-    TraverseCompoundStmt(expr->getBody());
-    return is_resumable_;
+  bool shouldVisitTemplateInstantiations() const
+  {
+    return true;
   }
 
   bool TraverseLambdaExpr(LambdaExpr* expr)
   {
-    ++nesting_level_;
-    TraverseCompoundStmt(expr->getBody());
-    --nesting_level_;
+    AnnotateAttr* attr = expr->getCallOperator()->getAttr<AnnotateAttr>();
+    if (attr && attr->getAnnotation() == "resumable")
+    {
+      // A resumable lambda begins a new call stack.
+      std::vector<FunctionDecl*> tmp_function_stack;
+      tmp_function_stack.swap(function_stack_);
+      TraverseCompoundStmt(expr->getBody());
+      tmp_function_stack.swap(function_stack_);
+    }
+    else
+    {
+      function_stack_.push_back(expr->getCallOperator());
+      TraverseCompoundStmt(expr->getBody());
+      function_stack_.pop_back();
+    }
     return true;
   }
 
-  bool VisitConditionalOperator(ConditionalOperator* op)
+  bool TraverseFunctionDecl(FunctionDecl* decl)
   {
-    if (nesting_level_ == 0 && IsYieldKeyword(op))
-      is_resumable_ = true;
+    function_stack_.push_back(decl);
+    bool result = RecursiveASTVisitor<resumable_function_detector>::TraverseFunctionDecl(decl);
+    function_stack_.pop_back();
+    return result;
+  }
+
+  bool TraverseCXXMethodDecl(CXXMethodDecl* decl)
+  {
+    function_stack_.push_back(decl);
+    bool result = RecursiveASTVisitor<resumable_function_detector>::TraverseFunctionDecl(decl);
+    function_stack_.pop_back();
+    return result;
+  }
+
+  bool VisitForStmt(ForStmt* stmt)
+  {
+    if (!function_stack_.empty() && IsYieldKeyword(stmt))
+      CheckAndAdd(function_stack_.back(), "'co_yield' or 'break_resumable' used in non-inline, non-template context");
     return true;
   }
 
-  bool VisitReturnStmt(ReturnStmt* stmt)
+  bool VisitCallExpr(CallExpr* expr)
   {
-    if (nesting_level_ == 0 && IsFromKeyword(stmt->getRetValue()))
-      is_resumable_ = true;
+    if (!function_stack_.empty())
+    {
+      if (Decl* decl = expr->getDirectCallee())
+      {
+        if (FunctionDecl* callee = dyn_cast<FunctionDecl>(decl->getCanonicalDecl()))
+        {
+          callers_.insert(std::make_pair(callee, function_stack_.back()));
+          return true;
+        }
+      }
+
+      if (BlockExpr* block = dyn_cast<BlockExpr>(expr->getCallee()->IgnoreParenImpCasts()))
+        if (Decl* decl = dyn_cast<FunctionDecl>(block->getBlockDecl()))
+          if (FunctionDecl* callee = dyn_cast<FunctionDecl>(decl->getCanonicalDecl()))
+            callers_.insert(std::make_pair(callee, function_stack_.back()));
+    }
+
     return true;
+  }
+
+  void AnalyzeCallGraph()
+  {
+    std::vector<FunctionDecl*> resumables(resumable_functions_.begin(), resumable_functions_.end());
+    for (auto decl : resumables)
+      CheckAndAddCallers(decl);
   }
 
 private:
-  bool is_resumable_ = false;
-  int nesting_level_ = 0;
+  void CheckAndAdd(FunctionDecl* decl, const char* error)
+  {
+    if (decl->isInlined())
+    {
+      resumable_functions_.insert(decl);
+      return;
+    }
+
+    if (decl->isTemplateInstantiation())
+    {
+      resumable_functions_.insert(decl);
+      return;
+    }
+
+    if (decl->isDependentContext())
+      return; // Function templates are ignored.
+
+    llvm::errs() << decl->getLocation().printToString(source_manager_);
+    llvm::errs() << ": error: " << error << "\n";
+    std::exit(1);
+  }
+
+  void CheckAndAddCallers(FunctionDecl* callee)
+  {
+    auto range = callers_.equal_range(callee);
+    for (auto iter = range.first; iter != range.second; ++iter)
+    {
+      if (resumable_functions_.count(iter->second) == 0)
+      {
+        CheckAndAdd(iter->second, "resumable function used in non-inline, non-template context");
+        CheckAndAddCallers(iter->second);
+      }
+    }
+  }
+
+  SourceManager& source_manager_;
+  std::vector<FunctionDecl*> function_stack_;
+  std::unordered_set<FunctionDecl*> resumable_functions_;
+  std::unordered_multimap<FunctionDecl*, FunctionDecl*> callers_;
 };
 
 //------------------------------------------------------------------------------
@@ -287,7 +283,6 @@ public:
     std::string type;
     std::string name;
     std::string full_name;
-    std::string generator_expr;
     int yield_id;
   };
 
@@ -303,8 +298,8 @@ public:
   {
     curr_scope_path_.clear();
     next_scope_id_ = 0;
-    curr_yield_id_ = 1;
-    curr_scope_yield_id_ = 1;
+    curr_yield_id_ = 0;
+    curr_scope_yield_id_ = 0;
     TraverseCompoundStmt(lambda_expr_->getBody());
   }
 
@@ -371,16 +366,6 @@ public:
     return iter != yield_to_subgen_.end() ? iter->second : "";
   }
 
-  bool isReachable(int from_yield_id, int to_yield_id)
-  {
-    return is_reachable_yield_.count(std::make_pair(from_yield_id, to_yield_id)) > 0;
-  }
-
-  bool hasVoidReturn() const
-  {
-    return has_void_return_;
-  }
-
   bool TraverseCompoundStmt(CompoundStmt* stmt)
   {
     int curr_scope_id = next_scope_id_;
@@ -390,13 +375,7 @@ public:
     ptr_to_yield_[stmt] = enclosing_scope_yield_id;
 
     for (CompoundStmt::body_iterator b = stmt->body_begin(), e = stmt->body_end(); b != e; ++b)
-    {
       TraverseStmt(*b);
-      if (BinaryOperator* bin_op = dyn_cast<BinaryOperator>(*b))
-        if (bin_op->isAssignmentOp())
-          if (IsYieldKeyword(bin_op->getRHS()))
-            has_void_return_ = true;
-    }
 
     curr_scope_yield_id_ = enclosing_scope_yield_id;
     curr_scope_path_.pop_back();
@@ -407,6 +386,12 @@ public:
 
   bool TraverseForStmt(ForStmt* stmt)
   {
+    if (IsYieldKeyword(stmt))
+    {
+      AddYieldPoint(stmt);
+      return RecursiveASTVisitor<resumable_lambda_locals>::TraverseForStmt(stmt);
+    }
+
     int curr_scope_id = next_scope_id_;
     curr_scope_path_.push_back(curr_scope_id);
     next_scope_id_ = 0;
@@ -495,16 +480,15 @@ public:
     if (decl->hasLocalStorage())
     {
       int yield_id = AddYieldPoint(decl);
-      std::string inner_type = decl->getType().getAsString();
-      if (inner_type.find("class ") == 0) inner_type = inner_type.substr(6);
-      if (inner_type.find("struct ") == 0) inner_type = inner_type.substr(7);
-      std::string type = "__resumable_local_type_t<" + inner_type + ">";
+      std::string type = decl->getType().getAsString();
+      if (type.find("class ") == 0) type = type.substr(6);
+      if (type.find("struct ") == 0) type = type.substr(7);
       std::string name = decl->getDeclName().getAsString();
       std::string full_name;
       for (int scope: curr_scope_path_)
         full_name += "__s" + std::to_string(scope) + ".";
       full_name += name;
-      iterator iter = scope_to_local_.insert(std::make_pair(curr_scope_path_, local{type, name, full_name, "", yield_id}));
+      iterator iter = scope_to_local_.insert(std::make_pair(curr_scope_path_, local{type, name, full_name, yield_id}));
       ptr_to_iter_[decl] = iter;
 
       if (decl->hasInit())
@@ -548,55 +532,9 @@ public:
     return result;
   }
 
-  bool TraverseConditionalOperator(ConditionalOperator* op)
-  {
-    bool result = RecursiveASTVisitor<resumable_lambda_locals>::TraverseConditionalOperator(op);
-
-    if (Expr* after_yield = IsYieldKeyword(op))
-    {
-      if (op->getType()->isVoidType())
-        has_void_return_ = true;
-
-      if (Expr* after_from = IsFromKeyword(after_yield))
-      {
-        if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(after_from))
-        {
-          AddGenerator(op, temp);
-        }
-        else
-        {
-          int yield_id = AddYieldPoint(op);
-          yield_to_subgen_[yield_id] = rewriter_.getRewrittenText(SourceRange(after_from->getLocStart(), after_from->getLocEnd().getLocWithOffset(1)));
-        }
-
-        return result;
-      }
-
-      AddYieldPoint(op);
-    }
-
-    return result;
-  }
-
   bool TraverseReturnStmt(ReturnStmt* stmt)
   {
     bool result = RecursiveASTVisitor<resumable_lambda_locals>::TraverseReturnStmt(stmt);
-
-    if (Expr* after_from = IsFromKeyword(stmt->getRetValue()))
-    {
-      if (stmt->getRetValue()->getType()->isVoidType())
-        has_void_return_ = true;
-
-      if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(after_from))
-      {
-        AddGenerator(stmt, temp);
-
-        return result;
-      }
-
-      int yield_id = AddYieldPoint(stmt);
-      yield_to_subgen_[yield_id] = rewriter_.getRewrittenText(SourceRange(after_from->getLocStart(), after_from->getLocEnd().getLocWithOffset(1)));
-    }
 
     return result;
   }
@@ -633,12 +571,6 @@ public:
     {
       rewriter_.ReplaceText(SourceRange(expr->getLocStart(), expr->getLocEnd()), iter->second.full_name);
     }
-    else if (expr->getDecl()->getType().getAsString() == "const struct __lambda_this_t")
-    {
-      auto lthis = rewriter_.getSourceMgr().getImmediateExpansionRange(expr->getLocStart());
-      SourceRange range(lthis.first, lthis.second);
-      rewriter_.ReplaceText(range, "this");
-    }
     else
     {
       for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
@@ -671,48 +603,6 @@ private:
     return yield_id;
   }
 
-  void AddGenerator(Stmt* parent, MaterializeTemporaryExpr* temp)
-  {
-    int curr_scope_id = next_scope_id_;
-    curr_scope_path_.push_back(curr_scope_id);
-    next_scope_id_ = 0;
-    int enclosing_scope_yield_id = curr_scope_yield_id_;
-
-    int temp_yield_id = AddYieldPoint(temp);
-
-    std::string inner_type = "typename ::std::decay<" + temp->getType().getAsString() + ">::type";
-    if (inner_type.find("lambda at") != std::string::npos)
-      inner_type = "decltype(" + rewriter_.ConvertToString(temp) + ")";
-    std::string type = "__resumable_generator_type_t<" + inner_type + ">";
-    std::string name = "__temp" + std::to_string(temp_yield_id);
-    std::string full_name;
-    for (int scope: curr_scope_path_)
-      full_name += "__s" + std::to_string(scope) + ".";
-    full_name += name;
-
-    std::string expr = "__resumable_generator_init(&" + full_name + "), ";
-    expr += "this->__state = " + std::to_string(temp_yield_id) + ", ";
-    expr += "__resumable_generator_construct(&" + full_name + ", ";
-    expr += rewriter_.getRewrittenText(SourceRange(temp->getLocStart(), temp->getLocEnd())) + ")";
-
-    iterator iter = scope_to_local_.insert(std::make_pair(curr_scope_path_, local{type, name, full_name, expr, temp_yield_id}));
-    ptr_to_iter_[temp] = iter;
-    yield_to_iter_[temp_yield_id] = iter;
-
-    SourceRange range(temp->getLocStart(), temp->getLocEnd());
-    rewriter_.ReplaceText(range, full_name);
-
-    int yield_id = AddYieldPoint(parent);
-    yield_to_iter_[yield_id] = iter;
-
-    yield_to_subgen_[yield_id] = full_name;
-    yield_to_subgen_[temp_yield_id] = full_name;
-
-    curr_scope_yield_id_ = enclosing_scope_yield_id;
-    curr_scope_path_.pop_back();
-    next_scope_id_ = curr_scope_id + 1;
-  }
-
   Rewriter& rewriter_;
   LambdaExpr* lambda_expr_ = nullptr;
   scope_path curr_scope_path_;
@@ -726,7 +616,6 @@ private:
   std::unordered_map<int, int> yield_to_prior_yield_;
   std::set<std::pair<int, int>> is_reachable_yield_;
   std::unordered_map<int, std::string> yield_to_subgen_;
-  bool has_void_return_ = false;
 };
 
 //------------------------------------------------------------------------------
@@ -747,7 +636,8 @@ public:
 
   void Generate()
   {
-    if (!resumable_lambda_detector().IsResumable(lambda_expr_))
+    AnnotateAttr* attr = lambda_expr_->getCallOperator()->getAttr<AnnotateAttr>();
+    if (!attr || attr->getAnnotation() != "resumable")
       return;
 
     locals_.Build();
@@ -762,54 +652,24 @@ public:
     before << "  struct __resumable_lambda_" << lambda_id_ << "_capture\n";
     before << "  {\n";
     EmitCaptureConstructor(before);
-    before << "\n";
     EmitCaptureMembers(before);
     before << "  };\n";
     before << "\n";
-    before << "  struct __resumable_lambda_" << lambda_id_ << "_locals_data\n";
+    before << "  struct __resumable_lambda_" << lambda_id_ << "_locals\n";
     before << "  {\n";
-    before << "    __resumable_lambda_" << lambda_id_ << "_locals_data() {}\n";
-    before << "    __resumable_lambda_" << lambda_id_ << "_locals_data(const __resumable_lambda_" << lambda_id_ << "_locals_data&) = delete;\n";
-    before << "    __resumable_lambda_" << lambda_id_ << "_locals_data(__resumable_lambda_" << lambda_id_ << "_locals_data&&) = delete;\n";
-    before << "    __resumable_lambda_" << lambda_id_ << "_locals_data& operator=(__resumable_lambda_" << lambda_id_ << "_locals_data&&) = delete;\n";
-    before << "    __resumable_lambda_" << lambda_id_ << "_locals_data& operator=(const __resumable_lambda_" << lambda_id_ << "_locals_data&) = delete;\n";
-    before << "    ~__resumable_lambda_" << lambda_id_ << "_locals_data() {}\n";
+    before << "    __resumable_lambda_" << lambda_id_ << "_locals() {}\n";
+    before << "    ~__resumable_lambda_" << lambda_id_ << "_locals() { this->__unwind_to(-1); }\n";
     before << "\n";
     EmitLocalsDataMembers(before);
     before << "\n";
     EmitLocalsDataUnwindTo(before);
     before << "  };\n";
     before << "\n";
-    before << "  struct __resumable_lambda_" << lambda_id_ << "_locals_unwinder\n";
-    before << "  {\n";
-    before << "    __resumable_lambda_" << lambda_id_ << "_locals_data* __locals;\n";
-    before << "\n";
-    before << "    ~__resumable_lambda_" << lambda_id_ << "_locals_unwinder()\n";
-    before << "    {\n";
-    before << "      if (this->__locals)\n";
-    before << "        this->__locals->__unwind_to(-1);\n";
-    before << "    }\n";
-    before << "  };\n";
-    before << "\n";
-    before << "  struct __resumable_lambda_" << lambda_id_ << "_locals :\n";
-    before << "    __resumable_lambda_" << lambda_id_ << "_locals_data\n";
-    before << "  {\n";
-    EmitLocalsConstructor(before);
-    before << "\n";
-    EmitLocalsCopyConstructor(before);
-    before << "\n";
-    EmitLocalsMoveConstructor(before);
-    before << "\n";
-    EmitLocalsDestructor(before);
-    before << "  };\n";
-    before << "\n";
     before << "  struct __resumable_lambda_" << lambda_id_ << ";\n";
-    before << "  struct __resumable_lambda_" << lambda_id_ << "_in_place;\n";
     before << "\n";
     before << "  struct __resumable_lambda_" << lambda_id_ << "_initializer\n";
     before << "  {\n";
     before << "    typedef __resumable_lambda_" << lambda_id_ << " lambda __RESUMABLE_UNUSED_TYPEDEF;\n";
-    before << "    typedef __resumable_lambda_" << lambda_id_ << "_in_place generator_type __RESUMABLE_UNUSED_TYPEDEF;\n";
     before << "    __resumable_lambda_" << lambda_id_ << "_capture __capture;\n";
     before << "  };\n";
     before << "\n";
@@ -817,28 +677,40 @@ public:
     before << "    private __resumable_lambda_" << lambda_id_ << "_capture,\n";
     before << "    private __resumable_lambda_" << lambda_id_ << "_locals\n";
     before << "  {\n";
+    before << "    __resumable_lambda_" << lambda_id_ << "(const __resumable_lambda_" << lambda_id_ << "&) = delete;\n";
+    before << "    __resumable_lambda_" << lambda_id_ << "(__resumable_lambda_" << lambda_id_ << "&&) = delete;\n";
+    before << "    __resumable_lambda_" << lambda_id_ << "& operator=(__resumable_lambda_" << lambda_id_ << "&&) = delete;\n";
+    before << "    __resumable_lambda_" << lambda_id_ << "& operator=(const __resumable_lambda_" << lambda_id_ << "&) = delete;\n";
+    before << "\n";
     EmitConstructor(before);
+    before << "\n";
+    before << "    typedef __resumable_lambda_" << lambda_id_ << "_initializer initializer __RESUMABLE_UNUSED_TYPEDEF;\n";
     before << "\n";
     before << "    __resumable_lambda_" << lambda_id_ << "_initializer operator*() &&\n";
     before << "    {\n";
     before << "      return { static_cast<__resumable_lambda_" << lambda_id_ << "_capture&&>(*this) };\n";
     before << "    }\n";
     before << "\n";
-    before << "    bool is_initial() const noexcept { return this->__state == 0; }\n";
-    before << "    bool is_terminal() const noexcept { return this->__state == -1; }\n";
+    before << "    bool ready() const noexcept { return this->__state == -1; }\n";
     before << "\n";
-    EmitWantedType(before);
-    before << "\n";
-    EmitWanted(before);
-    before << "\n";
-    EmitCallOperatorDecl(before);
+    before << "    auto resume()\n";
     before << "    {\n";
-    before << "      __resumable_lambda_" << lambda_id_ << "_locals_unwinder __unwind = { this };\n";
-    before << "      switch (this->__state)\n";
+    before << "      struct __on_exit_t\n";
     before << "      {\n";
-    before << "      case 0:\n";
-    before << "        this->__state = 1;\n";
-    before << "      case 1:\n";
+    before << "        __resumable_lambda_" << lambda_id_ << "* __this;\n";
+    before << "        ~__on_exit_t() { if (__this) __this->__unwind_to(-1); }\n";
+    before << "      } __on_exit{this};\n";
+    before << "\n";
+    before << "      switch (this->__state)\n";
+    before << "        if (0)\n";
+    before << "        {\n";
+    before << "          goto __terminate; __terminate:\n";
+    before << "          this->__unwind_to(-1);\n";
+    before << "          goto __suspend; __suspend:\n";
+    before << "          default: (void)0;\n";
+    before << "        }\n";
+    before << "        else case 0:\n";
+    before << "\n";
     EmitLineNumber(before, body->getLocStart());
     rewriter_.ReplaceText(beforeBody, before.str());
 
@@ -846,13 +718,10 @@ public:
 
     std::stringstream after;
     after << "\n";
-    after << "      this->__unwind_to(-1);\n";
-    after << "      default: (void)0;\n";
-    after << "      }\n";
     after << "    }\n";
-    after << "  };\n";
     after << "\n";
-    EmitInPlaceGenerator(after);
+    after << "    auto operator()() { return resume(); }\n";
+    after << "  };\n";
     after << "\n";
     EmitFactory(after);
     after << "}()";
@@ -870,71 +739,7 @@ public:
       rewriter_.InsertTextBefore(stmt->getLocStart(), "{");
     }
 
-    for (CompoundStmt::body_iterator b = stmt->body_begin(), e = stmt->body_end(); b != e; ++b)
-    {
-      if (BinaryOperator* bin_op = dyn_cast<BinaryOperator>(*b))
-      {
-        if (bin_op->isAssignmentOp())
-        {
-          if (Expr* after_yield = IsYieldKeyword(bin_op->getRHS()))
-          {
-            if (Expr* after_from = IsFromKeyword(after_yield))
-            {
-              SourceRange target_range(bin_op->getLHS()->getLocStart(), bin_op->getOperatorLoc());
-              SourceRange expr_range(after_from->getLocStart(), Lexer::getLocForEndOfToken(after_from->getLocEnd(), 0, rewriter_.getSourceMgr(), rewriter_.getLangOpts()));
-              std::string expr = rewriter_.getRewrittenText(expr_range);
-
-              int yield_point = locals_.getYieldId(bin_op->getRHS());
-
-              std::stringstream os;
-              os << "\n";
-              os << "        do\n";
-              os << "        {\n";
-              if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(after_from))
-              {
-                resumable_lambda_locals::iterator iter = locals_.find(temp);
-                if (iter != locals_.end() && !iter->second.generator_expr.empty())
-                {
-                  EmitLineNumber(os, after_from->getLocStart());
-                  os << "          " << iter->second.generator_expr << ";\n";
-                }
-              }
-              os << "          this->__state = " << yield_point << ";\n";
-              os << "          for (;;)\n";
-              os << "          {\n";
-              os << "            {\n";
-              EmitLineNumber(os, after_from->getLocStart());
-              os << "              auto& __g = " << expr.substr(0, expr.length() - 1) << ";\n";
-              os << "              if (__g.is_terminal()) break;\n";
-              os << "              __unwind.__locals = nullptr;\n";
-              os << "              __resumable_generator_invoke<decltype(__g), decltype(__g())> __ret(__g);\n";
-              os << "              " << rewriter_.getRewrittenText(target_range) << " __ret.__get();\n";
-              os << "              return;\n";
-              os << "            }\n";
-              if (dyn_cast<MaterializeTemporaryExpr>(after_from))
-                os << "          case " << yield_point - 1 << ":\n";
-              os << "          case " << yield_point << ":\n";
-              os << "            (void)0;\n";
-              os << "          }\n";
-              if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(after_from))
-                os << "          this->__unwind_to(" << locals_.getPriorYieldId(locals_.getYieldId(temp)) << ");\n";
-              os << "        } while (false)" << expr.back();
-
-              rewriter_.RemoveText(target_range);
-              rewriter_.ReplaceText(expr_range, os.str());
-              auto macro = rewriter_.getSourceMgr().getImmediateExpansionRange(bin_op->getRHS()->getLocStart());
-              rewriter_.ReplaceText(SourceRange(macro.first, macro.second), "/*yield*/");
-              macro = rewriter_.getSourceMgr().getImmediateExpansionRange(after_yield->getLocStart());
-              rewriter_.ReplaceText(SourceRange(macro.first, macro.second), "/*from*/");
-
-              continue;
-            }
-          }
-        }
-      }
-
-      TraverseStmt(*b);
-    }
+    bool result = RecursiveASTVisitor<resumable_lambda_codegen>::TraverseCompoundStmt(stmt);
 
     if (stmt != lambda_expr_->getBody())
     {
@@ -943,11 +748,25 @@ public:
       rewriter_.InsertTextAfter(end, unwind);
     }
 
-    return true;
+    return result;
   }
 
   bool TraverseForStmt(ForStmt* stmt)
   {
+    if (IsYieldKeyword(stmt))
+    {
+      int yield_point = locals_.getYieldId(stmt);
+
+      // "yield" statement
+
+      std::stringstream os;
+      os << "__yield(" << yield_point << ")";
+      auto macro = rewriter_.getSourceMgr().getImmediateExpansionRange(stmt->getLocStart());
+      rewriter_.ReplaceText(SourceRange(macro.first, macro.second), os.str());
+
+      return RecursiveASTVisitor<resumable_lambda_codegen>::TraverseForStmt(stmt);
+    }
+
     if (stmt->getInit())
     {
       rewriter_.InsertTextBefore(stmt->getLocStart(), "{");
@@ -965,137 +784,8 @@ public:
     return result;
   }
 
-  bool TraverseConditionalOperator(ConditionalOperator* op)
-  {
-    bool result = RecursiveASTVisitor<resumable_lambda_codegen>::TraverseConditionalOperator(op);
-
-    if (Expr* after_yield = IsYieldKeyword(op))
-    {
-      if (Expr* after_from = IsFromKeyword(after_yield))
-      {
-        // "yield from"
-
-        SourceRange range(after_from->getLocStart(), Lexer::getLocForEndOfToken(after_from->getLocEnd(), 0, rewriter_.getSourceMgr(), rewriter_.getLangOpts()));
-        std::string expr = rewriter_.getRewrittenText(range);
-
-        int yield_point = locals_.getYieldId(op);
-
-        std::stringstream os;
-        os << "\n";
-        os << "        do\n";
-        os << "        {\n";
-        if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(after_from))
-        {
-          resumable_lambda_locals::iterator iter = locals_.find(temp);
-          if (iter != locals_.end() && !iter->second.generator_expr.empty())
-          {
-            EmitLineNumber(os, after_from->getLocStart());
-            os << "          " << iter->second.generator_expr << ";\n";
-          }
-        }
-        os << "          this->__state = " << yield_point << ";\n";
-        os << "          for (;;)\n";
-        os << "          {\n";
-        os << "            {\n";
-        EmitLineNumber(os, after_from->getLocStart());
-        os << "              auto& __g = " << expr.substr(0, expr.length() - 1) << ";\n";
-        os << "              if (__g.is_terminal()) break;\n";
-        os << "              __unwind.__locals = nullptr;\n";
-        os << "              __resumable_generator_invoke<decltype(__g), decltype(__g())> __ret(__g);\n";
-        os << "              return __ret.__get();\n";
-        os << "            }\n";
-        if (dyn_cast<MaterializeTemporaryExpr>(after_from))
-          os << "          case " << yield_point - 1 << ":\n";
-        os << "          case " << yield_point << ":\n";
-        os << "            (void)0;\n";
-        os << "          }\n";
-        if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(after_from))
-          os << "          this->__unwind_to(" << locals_.getPriorYieldId(locals_.getYieldId(temp)) << ");\n";
-        os << "        } while (false)" << expr.back();
-
-        rewriter_.ReplaceText(range, os.str());
-        auto macro = rewriter_.getSourceMgr().getImmediateExpansionRange(op->getLocStart());
-        rewriter_.ReplaceText(SourceRange(macro.first, macro.second), "/*yield*/");
-        macro = rewriter_.getSourceMgr().getImmediateExpansionRange(after_yield->getLocStart());
-        rewriter_.ReplaceText(SourceRange(macro.first, macro.second), "/*from*/");
-      }
-      else
-      {
-        // "yield"
-
-        SourceRange range(after_yield->getLocStart(), Lexer::getLocForEndOfToken(after_yield->getLocEnd(), 0, rewriter_.getSourceMgr(), rewriter_.getLangOpts()));
-        std::string expr = rewriter_.getRewrittenText(range);
-
-        int yield_point = locals_.getYieldId(op);
-
-        std::stringstream os;
-        os << "\n";
-        os << "        do\n";
-        os << "        {\n";
-        os << "          this->__state = " << yield_point << ";\n";
-        os << "          __unwind.__locals = nullptr;\n";
-        EmitLineNumber(os, after_yield->getLocStart());
-        os << "          return " << expr.substr(0, expr.length() - 1) << ";\n";
-        os << "        case " << yield_point << ":\n";
-        os << "          (void)0;\n";
-        os << "        } while (false)" << expr.back();
-
-        rewriter_.ReplaceText(range, os.str());
-        auto macro = rewriter_.getSourceMgr().getImmediateExpansionRange(op->getLocStart());
-        rewriter_.ReplaceText(SourceRange(macro.first, macro.second), "/*yield*/");
-      }
-    }
-
-    return result;
-  }
-
   bool VisitReturnStmt(ReturnStmt* stmt)
   {
-    if (Expr* after_from = IsFromKeyword(stmt->getRetValue()))
-    {
-      // "return from"
-
-      SourceRange range(after_from->getLocStart(), Lexer::getLocForEndOfToken(after_from->getLocEnd(), 0, rewriter_.getSourceMgr(), rewriter_.getLangOpts()));
-      std::string expr = rewriter_.getRewrittenText(range);
-
-      int yield_point = locals_.getYieldId(stmt);
-
-      std::stringstream os;
-      os << "\n";
-      os << "        do\n";
-      os << "        {\n";
-      if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(after_from))
-      {
-        resumable_lambda_locals::iterator iter = locals_.find(temp);
-        if (iter != locals_.end() && !iter->second.generator_expr.empty())
-          os << "          " << iter->second.generator_expr << ";\n";
-      }
-      os << "          this->__state = " << yield_point << ";\n";
-      os << "          for (;;)\n";
-      os << "          {\n";
-      os << "            {\n";
-      os << "              auto& __g = " << expr.substr(0, expr.length() - 1) << ";\n";
-      os << "              __unwind.__locals = nullptr;\n";
-      os << "              __resumable_generator_invoke<decltype(__g), decltype(__g())> __ret(__g);\n";
-      os << "              if (__g.is_terminal())\n";
-      os << "                this->__state = -1;\n";
-      os << "              return __ret.__get();\n";
-      os << "            }\n";
-      if (dyn_cast<MaterializeTemporaryExpr>(after_from))
-        os << "          case " << yield_point - 1 << ":\n";
-      os << "          case " << yield_point << ":\n";
-      os << "            (void)0;\n";
-      os << "          }\n";
-      if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(after_from))
-        os << "          this->__unwind_to(" << locals_.getPriorYieldId(locals_.getYieldId(temp)) << ");\n";
-      os << "        } while (false)" << expr.back();
-
-      rewriter_.ReplaceText(range, os.str());
-      rewriter_.ReplaceText(stmt->getLocStart(), 6, "/*return*/");
-      auto macro = rewriter_.getSourceMgr().getImmediateExpansionRange(stmt->getRetValue()->getLocStart());
-      rewriter_.ReplaceText(SourceRange(macro.first, macro.second), "/*from*/");
-    }
-
     return true;
   }
 
@@ -1180,6 +870,8 @@ private:
   {
     for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
     {
+      if (c == lambda_expr_->capture_begin())
+        os << "\n";
       if (c->getCaptureKind() == LCK_This)
       {
         os << "    __resumable_lambda_" << lambda_id_ << "_this_type __this;\n";
@@ -1200,7 +892,7 @@ private:
     resumable_lambda_locals::scope_path curr_path;
     std::string indent = "      ";
 
-    os << "    int __state;\n";
+    os << "    int __state = 0;\n";
     os << "    union\n";
     os << "    {\n";
     for (resumable_lambda_locals::iterator v = locals_.begin(), e = locals_.end(); v != e; ++v)
@@ -1217,7 +909,7 @@ private:
         os << indent << "} __s" << curr_path.back() << ";\n";
         curr_path.pop_back();
       }
-      for (bool first = true; curr_path.size() < v->first.size(); first = false)
+      while (curr_path.size() < v->first.size())
       {
         os << indent << "struct\n";
         os << indent << "{\n";
@@ -1254,19 +946,8 @@ private:
       {
         std::string name = iter->second.full_name;
         os << "          {\n";
-        if (iter->second.generator_expr.empty())
-        {
-          os << "            typedef decltype(" << name << ") __type;\n";
-          os << "            " << name << ".~__type();\n";
-        }
-        else if (iter == locals_.find(yield_id - 1))
-        {
-          os << "            __resumable_generator_destroy(&" + name + ");\n";
-        }
-        else
-        {
-          os << "            __resumable_generator_fini(&" + name + ");\n";
-        }
+        os << "            typedef decltype(" << name << ") __type;\n";
+        os << "            " << name << ".~__type();\n";
         os << "            this->__state = " << prior_yield_id << ";\n";
         os << "            break;\n";
         os << "          }\n";
@@ -1282,105 +963,6 @@ private:
     os << "          break;\n";
     os << "        }\n";
     os << "      }\n";
-    os << "    }\n";
-  }
-
-  void EmitLocalsConstructor(std::ostream& os)
-  {
-    os << "    __resumable_lambda_" << lambda_id_ << "_locals()\n";
-    os << "    {\n";
-    os << "      this->__state = 0;\n";
-    os << "    }\n";
-  }
-
-  void EmitLocalsCopyConstructor(std::ostream& os)
-  {
-    os << "    enum { __is_copy_constructible_v =\n";
-    for (resumable_lambda_locals::iterator v = locals_.begin(), e = locals_.end(); v != e; ++v)
-      os << "      ::std::is_copy_constructible<decltype(" << v->second.full_name << ")>::value &&\n";
-    os << "      true };\n";
-    os << "\n";
-    os << "    typedef ::std::integral_constant<bool, __is_copy_constructible_v>\n";
-    os << "      __is_copy_constructible __RESUMABLE_UNUSED_TYPEDEF;\n";
-    os << "\n";
-    os << "    typedef typename ::std::conditional<__is_copy_constructible_v,\n";
-    os << "        __resumable_lambda_" << lambda_id_ << "_locals,\n";
-    os << "        __resumable_copy_disabled<__resumable_lambda_" << lambda_id_ << "_locals_data>\n";
-    os << "      >::type __copy_constructor_arg;\n";
-    os << "\n";
-    os << "    __resumable_lambda_" << lambda_id_ << "_locals(const __copy_constructor_arg& __other) :\n";
-    os << "      __resumable_lambda_" << lambda_id_ << "_locals_data()\n";
-    os << "    {\n";
-    os << "      __resumable_lambda_" << lambda_id_ << "_locals_unwinder __unwind = { this };\n";
-    for (resumable_lambda_locals::iterator v = locals_.begin(), e = locals_.end(); v != e; ++v)
-    {
-      std::string name = v->second.full_name;
-      int yield_id = v->second.yield_id;
-
-      os << "      switch (__other.__state)\n";
-      os << "      {\n";
-      for (int i = 0; i <= locals_.getLastYieldId(); ++i)
-        if (yield_id == i || locals_.isReachable(yield_id, i))
-          os << "      case " << i << ":\n";
-      os << "        __resumable_local_new(__is_copy_constructible(), &" + name + ", __other." + name + ");\n";
-      os << "        this->__state = " << yield_id << ";\n";
-      os << "        break;\n";
-      os << "      default:\n";
-      os << "        break;\n";
-      os << "      }\n";
-    }
-    os << "      this->__state = __other.__state;\n";
-    os << "      __unwind.__locals = nullptr;\n";
-    os << "    }\n";
-  }
-
-  void EmitLocalsMoveConstructor(std::ostream& os)
-  {
-    os << "    enum { __is_move_constructible_v =\n";
-    for (resumable_lambda_locals::iterator v = locals_.begin(), e = locals_.end(); v != e; ++v)
-      os << "      ::std::is_move_constructible<decltype(" << v->second.full_name << ")>::value &&\n";
-    os << "      true };\n";
-    os << "\n";
-    os << "    typedef ::std::integral_constant<bool, __is_move_constructible_v>\n";
-    os << "      __is_move_constructible __RESUMABLE_UNUSED_TYPEDEF;\n";
-    os << "\n";
-    os << "    typedef typename ::std::conditional<__is_move_constructible_v,\n";
-    os << "        __resumable_lambda_" << lambda_id_ << "_locals,\n";
-    os << "        __resumable_move_disabled<__resumable_lambda_" << lambda_id_ << "_locals_data>\n";
-    os << "      >::type __move_constructor_arg;\n";
-    os << "\n";
-    os << "    __resumable_lambda_" << lambda_id_ << "_locals(__move_constructor_arg&& __other) :\n";
-    os << "      __resumable_lambda_" << lambda_id_ << "_locals_data()\n";
-    os << "    {\n";
-    os << "      __resumable_lambda_" << lambda_id_ << "_locals_unwinder __unwind = { this };\n";
-    os << "      __resumable_lambda_" << lambda_id_ << "_locals_unwinder __unwind_other = { &__other };\n";
-    for (resumable_lambda_locals::iterator v = locals_.begin(), e = locals_.end(); v != e; ++v)
-    {
-      std::string name = v->second.full_name;
-      int yield_id = v->second.yield_id;
-
-      os << "      switch (__other.__state)\n";
-      os << "      {\n";
-      for (int i = 0; i <= locals_.getLastYieldId(); ++i)
-        if (yield_id == i || locals_.isReachable(yield_id, i))
-          os << "      case " << i << ":\n";
-      os << "        __resumable_local_new(__is_move_constructible(), &" + name + ", static_cast<decltype(" + name + ")&&>(__other." + name + "));\n";
-      os << "        this->__state = " << v->second.yield_id << ";\n";
-      os << "        break;\n";
-      os << "      default:\n";
-      os << "        break;\n";
-      os << "      }\n";
-    }
-    os << "      this->__state = __other.__state;\n";
-    os << "      __unwind.__locals = nullptr;\n";
-    os << "    }\n";
-  }
-
-  void EmitLocalsDestructor(std::ostream& os)
-  {
-    os << "    ~__resumable_lambda_" << lambda_id_ << "_locals()\n";
-    os << "    {\n";
-    os << "      this->__unwind_to(-1);\n";
     os << "    }\n";
   }
 
@@ -1438,156 +1020,6 @@ private:
     os << "          static_cast<__resumable_lambda_" << lambda_id_ << "_capture&&>(__init.__capture))\n";
     os << "    {\n";
     os << "    }\n";
-  }
-
-  void EmitCallOperatorDecl(std::ostream& os)
-  {
-    CXXMethodDecl* method = lambda_expr_->getCallOperator();
-    os << "    ";
-    if (lambda_expr_->hasExplicitResultType())
-      os << method->getReturnType().getAsString();
-    else if (locals_.hasVoidReturn())
-      os << "void";
-    else
-      os << "auto";
-    os << " operator()(";
-    for (FunctionDecl::param_iterator p = method->param_begin(), e = method->param_end(); p != e; ++p)
-    {
-      if (p != method->param_begin())
-        os << ",";
-      os << "\n      " << (*p)->getType().getAsString() << " " << (*p)->getNameAsString();
-    }
-    os << ")\n";
-  }
-
-  void EmitWantedType(std::ostream& os)
-  {
-    os << "    const std::type_info& wanted_type() const noexcept\n";
-    os << "    {\n";
-    os << "      switch (this->__state)\n";
-    os << "      {\n";
-    for (int yield_id = 0; yield_id <= locals_.getLastYieldId(); ++yield_id)
-    {
-      std::string subgen = locals_.getSubGenerator(yield_id);
-      if (!subgen.empty())
-      {
-        os << "      case " << yield_id << ":\n";
-        os << "        return (" + subgen + ").wanted_type();\n";
-      }
-    }
-    os << "      default:\n";
-    os << "        return typeid(void);\n";
-    os << "      }\n";
-    os << "    }\n";
-  }
-
-  void EmitWanted(std::ostream& os)
-  {
-    os << "    void* wanted() noexcept\n";
-    os << "    {\n";
-    os << "      switch (this->__state)\n";
-    os << "      {\n";
-    for (int yield_id = 0; yield_id <= locals_.getLastYieldId(); ++yield_id)
-    {
-      std::string subgen = locals_.getSubGenerator(yield_id);
-      if (!subgen.empty())
-      {
-        os << "      case " << yield_id << ":\n";
-        os << "        return (" + subgen + ").wanted();\n";
-      }
-    }
-    os << "      default:\n";
-    os << "        return nullptr;\n";
-    os << "      }\n";
-    os << "    }\n";
-    os << "\n";
-    os << "    const void* wanted() const noexcept\n";
-    os << "    {\n";
-    os << "      switch (this->__state)\n";
-    os << "      {\n";
-    for (int yield_id = 0; yield_id <= locals_.getLastYieldId(); ++yield_id)
-    {
-      std::string subgen = locals_.getSubGenerator(yield_id);
-      if (!subgen.empty())
-      {
-        os << "      case " << yield_id << ":\n";
-        os << "        return (" + subgen + ").wanted();\n";
-      }
-    }
-    os << "      default:\n";
-    os << "        return nullptr;\n";
-    os << "      }\n";
-    os << "    }\n";
-  }
-
-  void EmitInPlaceGenerator(std::ostream& os)
-  {
-    os << "  struct __resumable_lambda_" << lambda_id_ << "_in_place\n";
-    os << "  {\n";
-    os << "    __resumable_lambda_" << lambda_id_ << "_in_place() {}\n";
-    os << "    __resumable_lambda_" << lambda_id_ << "_in_place(const __resumable_lambda_" << lambda_id_ << "_in_place&) = delete;\n";
-    os << "    __resumable_lambda_" << lambda_id_ << "_in_place(__resumable_lambda_" << lambda_id_ << "_in_place&&) = delete;\n";
-    os << "    __resumable_lambda_" << lambda_id_ << "_in_place& operator=(__resumable_lambda_" << lambda_id_ << "_in_place&&) = delete;\n";
-    os << "    __resumable_lambda_" << lambda_id_ << "_in_place& operator=(const __resumable_lambda_" << lambda_id_ << "_in_place&) = delete;\n";
-    os << "    ~__resumable_lambda_" << lambda_id_ << "_in_place() {}\n";
-    os << "\n";
-    os << "    void construct(__resumable_lambda_" << lambda_id_ << "_initializer&& __init)\n";
-    os << "    {\n";
-    os << "      new (static_cast<void*>(&this->__lambda)) __resumable_lambda_" << lambda_id_ << "(\n";
-    os << "          static_cast<__resumable_lambda_" << lambda_id_ << "_initializer&&>(__init));\n";
-    os << "    }\n";
-    os << "\n";
-    os << "    void destroy()\n";
-    os << "    {\n";
-    os << "      this->__lambda.~__resumable_lambda_" << lambda_id_ << "();\n";
-    os << "    }\n";
-    os << "\n";
-    os << "    bool is_initial() const noexcept { return this->__lambda.is_initial(); }\n";
-    os << "    bool is_terminal() const noexcept { return this->__lambda.is_terminal(); }\n";
-    os << "\n";
-    os << "    const std::type_info& wanted_type() const noexcept\n";
-    os << "    {\n";
-    os << "      return this->__lambda.wanted_type();\n";
-    os << "    }\n";
-    os << "\n";
-    os << "    void* wanted() noexcept\n";
-    os << "    {\n";
-    os << "      return this->__lambda.wanted();\n";
-    os << "    }\n";
-    os << "\n";
-    os << "    const void* wanted() const noexcept\n";
-    os << "    {\n";
-    os << "      return this->__lambda.wanted();\n";
-    os << "    }\n";
-    os << "\n";
-    CXXMethodDecl* method = lambda_expr_->getCallOperator();
-    os << "    ";
-    if (lambda_expr_->hasExplicitResultType())
-      os << method->getReturnType().getAsString();
-    else if (locals_.hasVoidReturn())
-      os << "void";
-    else
-      os << "auto";
-    os << " operator()(";
-    for (FunctionDecl::param_iterator p = method->param_begin(), e = method->param_end(); p != e; ++p)
-    {
-      if (p != method->param_begin())
-        os << ",";
-      os << "\n      " << (*p)->getType().getAsString() << " " << (*p)->getNameAsString();
-    }
-    os << ")\n";
-    os << "    {\n";
-    os << "      return this->__lambda(";
-    for (FunctionDecl::param_iterator p = method->param_begin(), e = method->param_end(); p != e; ++p)
-    {
-      if (p != method->param_begin())
-        os << ",";
-      os << "\n      static_cast<" << (*p)->getType().getAsString() << ">(" << (*p)->getNameAsString() << ")";
-    }
-    os << ");\n";
-    os << "    }\n";
-    os << "    union { __resumable_lambda_" << lambda_id_ << " __lambda; };\n";
-    os << "  };\n";
   }
 
   void EmitFactory(std::ostream& os)
@@ -1690,10 +1122,10 @@ int resumable_lambda_codegen::next_lambda_id_ = 0;
 //------------------------------------------------------------------------------
 // This class visits the AST looking for potential resumable lambdas.
 
-class main_visitor : public RecursiveASTVisitor<main_visitor>
+class codegen_visitor : public RecursiveASTVisitor<codegen_visitor>
 {
 public:
-  main_visitor(Rewriter& r)
+  codegen_visitor(Rewriter& r)
     : rewriter_(r)
   {
   }
@@ -1708,7 +1140,7 @@ public:
   {
     if (decl->isTemplateInstantiation())
       return true;
-    return RecursiveASTVisitor<main_visitor>::TraverseFunctionDecl(decl);
+    return RecursiveASTVisitor<codegen_visitor>::TraverseFunctionDecl(decl);
   }
 
 private:
@@ -1722,24 +1154,23 @@ class consumer : public ASTConsumer
 {
 public:
   consumer(Rewriter& r)
-    : visitor_(r)
+    : resumable_detector_(r.getSourceMgr()),
+      codegen_(r)
   {
   }
 
-  bool HandleTopLevelDecl(DeclGroupRef decls) override
+  void HandleTranslationUnit(ASTContext& ctx) override
   {
-    for (DeclGroupRef::iterator b = decls.begin(), e = decls.end(); b != e; ++b)
-    {
-      if (verbose)
-        (*b)->dump();
-      visitor_.TraverseDecl(*b);
-    }
-
-    return true;
+    if (verbose)
+      ctx.getTranslationUnitDecl()->dump();
+    resumable_detector_.TraverseDecl(ctx.getTranslationUnitDecl());
+    resumable_detector_.AnalyzeCallGraph();
+    codegen_.TraverseDecl(ctx.getTranslationUnitDecl());
   }
 
 private:
-  main_visitor visitor_;
+  resumable_function_detector resumable_detector_;
+  codegen_visitor codegen_;
 };
 
 //------------------------------------------------------------------------------
@@ -1771,11 +1202,19 @@ public:
     preamble += "#define __RESUMABLE_PREAMBLE\n";
     preamble += "\n";
     preamble += "#include <new>\n";
-    preamble += "#include <typeinfo>\n";
     preamble += "#include <type_traits>\n";
     preamble += "\n";
-    preamble += "#ifdef __GNUC__\n";
+    preamble += "#if defined(__clang__)\n";
+    preamble += "# if (__clang_major__ >= 7)\n";
+    preamble += "#  pragma GCC diagnostic ignored \"-Wdangling-else\"\n";
+    preamble += "#  pragma GCC diagnostic ignored \"-Wreturn-type\"\n";
+    preamble += "#  define __RESUMABLE_UNUSED_TYPEDEF __attribute__((__unused__))\n";
+    preamble += "# endif\n";
+    preamble += "#elif defined(__GNUC__)\n";
     preamble += "# if ((__GNUC__ == 4) && (__GNUC_MINOR__ >= 8)) || (__GNUC__ > 4)\n";
+    preamble += "#  pragma GCC diagnostic ignored \"-Wparentheses\"\n";
+    preamble += "#  pragma GCC diagnostic ignored \"-Wreturn-type\"\n";
+    preamble += "#  pragma GCC diagnostic ignored \"-Wuninitialized\"\n";
     preamble += "#  define __RESUMABLE_UNUSED_TYPEDEF __attribute__((__unused__))\n";
     preamble += "# endif\n";
     preamble += "#endif\n";
@@ -1786,170 +1225,43 @@ public:
     preamble += "struct __resumable_dummy_arg {};\n";
     preamble += "\n";
     preamble += "template <class _T>\n";
-    preamble += "struct __resumable_copy_disabled : _T {};\n";
-    preamble += "\n";
-    preamble += "template <class _T>\n";
-    preamble += "struct __resumable_move_disabled : _T {};\n";
-    preamble += "\n";
-    preamble += "template <class _T>\n";
-    preamble += "struct __resumable_local_type\n";
+    preamble += "inline auto ready(const _T& __t) noexcept -> decltype(__t.ready())\n";
     preamble += "{\n";
-    preamble += "  typedef _T _Type;\n";
-    preamble += "};\n";
-    preamble += "\n";
-    preamble += "template <class _T>\n";
-    preamble += "using __resumable_local_type_t = typename __resumable_local_type<_T>::_Type;\n";
-    preamble += "\n";
-    preamble += "template <class _T, class... _Args>\n";
-    preamble += "inline void __resumable_local_new(::std::true_type, _T* __p, _Args&&... __args)\n";
-    preamble += "{\n";
-    preamble += "  new (static_cast<void*>(__p)) _T(static_cast<_Args&&>(__args)...);\n";
-    preamble += "}\n";
-    preamble += "\n";
-    preamble += "template <class _T, class... _Args>\n";
-    preamble += "inline void __resumable_local_new(::std::false_type, _T*, _Args&&...)\n";
-    preamble += "{\n";
-    preamble += "}\n";
-    preamble += "\n";
-    preamble += "template <class>\n";
-    preamble += "struct __resumable_check { typedef void _Type; };\n";
-    preamble += "\n";
-    preamble += "template <class _T>\n";
-    preamble += "struct __resumable_generator : _T {};\n";
-    preamble += "\n";
-    preamble += "template <class _T, class = void>\n";
-    preamble += "struct __resumable_generator_type\n";
-    preamble += "{\n";
-    preamble += "  typedef _T _Type;\n";
-    preamble += "};\n";
-    preamble += "\n";
-    preamble += "template <class _T>\n";
-    preamble += "struct __resumable_generator_type<_T,\n";
-    preamble += "  typename __resumable_check<typename _T::generator_type>::_Type>\n";
-    preamble += "{\n";
-    preamble += "  typedef __resumable_generator<typename _T::generator_type> _Type;\n";
-    preamble += "};\n";
-    preamble += "\n";
-    preamble += "template <class _T>\n";
-    preamble += "using __resumable_generator_type_t = typename __resumable_generator_type<_T>::_Type;\n";
-    preamble += "\n";
-    preamble += "template <class _T>\n";
-    preamble += "inline void __resumable_generator_init(__resumable_generator<_T>* __p)\n";
-    preamble += "{\n";
-    preamble += "  new (static_cast<void*>(__p)) __resumable_generator<_T>;\n";
-    preamble += "}\n";
-    preamble += "\n";
-    preamble += "template <class _T, class... _Args>\n";
-    preamble += "inline void __resumable_generator_construct(__resumable_generator<_T>* __p, _Args&&... __args)\n";
-    preamble += "{\n";
-    preamble += "  __p->construct(static_cast<_Args&&>(__args)...);\n";
+    preamble += "  return __t.ready();\n";
     preamble += "}\n";
     preamble += "\n";
     preamble += "template <class _T>\n";
-    preamble += "inline void __resumable_generator_destroy(__resumable_generator<_T>* __p)\n";
+    preamble += "inline auto resume(_T& __t) -> decltype(__t.resume())\n";
     preamble += "{\n";
-    preamble += "  __p->destroy();\n";
+    preamble += "  return __t.resume();\n";
     preamble += "}\n";
     preamble += "\n";
     preamble += "template <class _T>\n";
-    preamble += "inline void __resumable_generator_fini(__resumable_generator<_T>* __p)\n";
-    preamble += "{\n";
-    preamble += "  __p->~_T();\n";
-    preamble += "}\n";
-    preamble += "\n";
-    preamble += "template <class _T>\n";
-    preamble += "inline void __resumable_generator_init(_T*)\n";
-    preamble += "{\n";
-    preamble += "}\n";
-    preamble += "\n";
-    preamble += "template <class _T, class... _Args>\n";
-    preamble += "inline void __resumable_generator_construct(_T* __p, _Args&&... __args)\n";
-    preamble += "{\n";
-    preamble += "  new (static_cast<void*>(__p)) _T(static_cast<_Args&&>(__args)...);\n";
-    preamble += "}\n";
-    preamble += "\n";
-    preamble += "template <class _T>\n";
-    preamble += "inline void __resumable_generator_destroy(_T* __p)\n";
-    preamble += "{\n";
-    preamble += "  __p->~_T();\n";
-    preamble += "}\n";
-    preamble += "\n";
-    preamble += "template <class _T>\n";
-    preamble += "inline void __resumable_generator_fini(_T*)\n";
-    preamble += "{\n";
-    preamble += "}\n";
-    preamble += "\n";
-    preamble += "template <class _T, class _Result>\n";
-    preamble += "struct __resumable_generator_invoke\n";
-    preamble += "{\n";
-    preamble += "  _Result __result;\n";
-    preamble += "  explicit __resumable_generator_invoke(_T& __t) : __result(__t()) {}\n";
-    preamble += "  _Result __get() { return static_cast<_Result&&>(__result); }\n";
-    preamble += "};\n";
-    preamble += "\n";
-    preamble += "template <class _T>\n";
-    preamble += "struct __resumable_generator_invoke<_T, void>\n";
-    preamble += "{\n";
-    preamble += "  explicit __resumable_generator_invoke(_T& __t) { __t(); }\n";
-    preamble += "  void __get() {}\n";
-    preamble += "};\n";
-    preamble += "\n";
-    preamble += "template <class _T>\n";
-    preamble += "inline bool is_initial(const _T& __t,\n";
-    preamble += "    typename __resumable_check<decltype(__t.is_initial())>::_Type* = 0) noexcept\n";
-    preamble += "{\n";
-    preamble += "  return __t.is_initial();\n";
-    preamble += "}\n";
-    preamble += "\n";
-    preamble += "template <class _T>\n";
-    preamble += "inline bool is_terminal(const _T& __t,\n";
-    preamble += "    typename __resumable_check<decltype(__t.is_terminal())>::_Type* = 0) noexcept\n";
-    preamble += "{\n";
-    preamble += "  return __t.is_terminal();\n";
-    preamble += "}\n";
-    preamble += "\n";
-    preamble += "template <class _T>\n";
-    preamble += "inline const ::std::type_info& wanted_type(const _T& __t,\n";
-    preamble += "    typename __resumable_check<decltype(__t.wanted_type())>::_Type* = 0) noexcept\n";
-    preamble += "{\n";
-    preamble += "  return __t.wanted_type();\n";
-    preamble += "}\n";
-    preamble += "\n";
-    preamble += "template <class _T>\n";
-    preamble += "inline void* wanted(_T& __t,\n";
-    preamble += "    typename __resumable_check<decltype(__t.wanted())>::_Type* = 0) noexcept\n";
-    preamble += "{\n";
-    preamble += "  return __t.wanted();\n";
-    preamble += "}\n";
-    preamble += "\n";
-    preamble += "template <class _T>\n";
-    preamble += "inline const void* wanted(const _T& __t,\n";
-    preamble += "    typename __resumable_check<decltype(__t.wanted())>::_Type* = 0) noexcept\n";
-    preamble += "{\n";
-    preamble += "  return __t.wanted();\n";
-    preamble += "}\n";
-    preamble += "\n";
-    preamble += "template <class _T>\n";
-    preamble += "inline auto initializer(_T&& __t,\n";
-    preamble += "    typename __resumable_check<typename decltype(*::std::declval<_T>())::generator_type>::_Type* = 0)\n";
+    preamble += "inline auto lambda_initializer(_T&& __t)\n";
     preamble += "{\n";
     preamble += "  return *static_cast<_T&&>(__t);\n";
     preamble += "}\n";
     preamble += "\n";
-    preamble += "template <class _T, class = void>\n";
-    preamble += "struct lambda\n";
-    preamble += "{\n";
-    preamble += "  typedef _T type;\n";
-    preamble += "};\n";
+    preamble += "template <class _T> using initializer_lambda = typename _T::lambda;\n";
     preamble += "\n";
-    preamble += "template <class _T>\n";
-    preamble += "struct lambda<_T,\n";
-    preamble += "  typename __resumable_check<typename _T::lambda>::_Type>\n";
-    preamble += "{\n";
-    preamble += "  typedef typename _T::lambda type;\n";
-    preamble += "};\n";
+    preamble += "#define __yield(n) \\\n";
+    preamble += "  for (this->__state = (n), __on_exit.__this = nullptr;;) \\\n";
+    preamble += "    if (0) \\\n";
+    preamble += "      case (n): break; \\\n";
+    preamble += "    else \\\n";
+    preamble += "      switch (0) \\\n";
+    preamble += "        for (;;) \\\n";
+    preamble += "          if (1) \\\n";
+    preamble += "            goto __terminate; \\\n";
+    preamble += "          else \\\n";
+    preamble += "            for (;;) \\\n";
+    preamble += "              if (1) \\\n";
+    preamble += "                goto __suspend; \\\n";
+    preamble += "            else case 0:\n";
     preamble += "\n";
-    preamble += "template <class _T> using lambda_t = typename lambda<_T>::type;\n";
+    preamble += "#define co_yield for (;;)\n";
+    preamble += "#define co_suspend for (;;)\n";
+    preamble += "#define break_resumable for (;;)\n";
     preamble += "\n";
     preamble += "#endif // __RESUMABLE_PREAMBLE\n";
     preamble += "\n";

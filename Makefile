@@ -43,7 +43,7 @@ CLANG_LIBS = \
 	$(END_GROUP)
 
 bin/resumable-pp: src/resumable-pp.cpp
-	$(CXX) -std=c++11 -Wall -Wno-strict-aliasing $(LLVM_CXXFLAGS) -o $@ $< $(CLANG_LIBS) $(LLVM_LDFLAGS)
+	$(CXX) -std=c++11 -Wall -Wno-strict-aliasing -g $(LLVM_CXXFLAGS) -o $@ $< $(CLANG_LIBS) $(LLVM_LDFLAGS)
 
 TESTS = $(wildcard test/*.cpp)
 TESTS_PP = $(TESTS:test/%.cpp=test/.pp.%.cpp)

@@ -13,9 +13,9 @@ int main()
 {
   const char* text = "hello";
 
-  auto lazy_h = [=]() resumable -> heavy* {
+  auto&& lazy_h = [=] resumable -> heavy* {
     for (heavy h(text);;)
-      yield &h;
+      co_yield return &h;
   };
 
   printf("before use\n");
