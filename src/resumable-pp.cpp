@@ -360,6 +360,12 @@ public:
     return iter != yield_to_prior_yield_.end() ? iter->second : 0;
   }
 
+  bool isVariable(int yield_id)
+  {
+    auto iter = yield_is_variable_.find(yield_id);
+    return iter != yield_is_variable_.end() ? iter->second : false;
+  }
+
   std::string getSubGenerator(int yield_id)
   {
     auto iter = yield_to_subgen_.find(yield_id);
@@ -388,7 +394,7 @@ public:
   {
     if (IsYieldKeyword(stmt))
     {
-      AddYieldPoint(stmt);
+      AddYieldPoint(stmt, false);
       return RecursiveASTVisitor<resumable_lambda_locals>::TraverseForStmt(stmt);
     }
 
@@ -479,7 +485,7 @@ public:
 
     if (decl->hasLocalStorage())
     {
-      int yield_id = AddYieldPoint(decl);
+      int yield_id = AddYieldPoint(decl, true);
       std::string type = decl->getType().getAsString();
       if (type.find("class ") == 0) type = type.substr(6);
       if (type.find("struct ") == 0) type = type.substr(7);
@@ -588,12 +594,13 @@ public:
   }
 
 private:
-  int AddYieldPoint(void* ptr)
+  int AddYieldPoint(void* ptr, bool is_variable)
   {
     int yield_id = ++curr_yield_id_;
     int prior_yield_id = curr_scope_yield_id_;
     ptr_to_yield_[ptr] = yield_id;
     yield_to_prior_yield_[yield_id] = prior_yield_id;
+    yield_is_variable_[yield_id] = is_variable;
     curr_scope_yield_id_ = yield_id;
     while (prior_yield_id > 0)
     {
@@ -616,6 +623,7 @@ private:
   std::unordered_map<int, int> yield_to_prior_yield_;
   std::set<std::pair<int, int>> is_reachable_yield_;
   std::unordered_map<int, std::string> yield_to_subgen_;
+  std::unordered_map<int, bool> yield_is_variable_;
 };
 
 //------------------------------------------------------------------------------
@@ -704,12 +712,15 @@ public:
     before << "      switch (this->__state)\n";
     before << "        if (0)\n";
     before << "        {\n";
+    for (int yield_id = 0; yield_id <= locals_.getLastYieldId(); ++yield_id)
+      if (!locals_.isVariable(yield_id))
+        before << "          case " << yield_id << ": goto __yield_point_" << yield_id << ";\n";
     before << "          goto __terminate; __terminate:\n";
     before << "          this->__unwind_to(-1);\n";
     before << "          goto __suspend; __suspend:\n";
     before << "          default: (void)0;\n";
     before << "        }\n";
-    before << "        else case 0:\n";
+    before << "        else __yield_point_0:\n";
     before << "\n";
     EmitLineNumber(before, body->getLocStart());
     rewriter_.ReplaceText(beforeBody, before.str());
@@ -1247,7 +1258,7 @@ public:
     preamble += "#define __yield(n) \\\n";
     preamble += "  for (this->__state = (n), __on_exit.__this = nullptr;;) \\\n";
     preamble += "    if (0) \\\n";
-    preamble += "      case (n): break; \\\n";
+    preamble += "      __yield_point_ ## n: break; \\\n";
     preamble += "    else \\\n";
     preamble += "      switch (0) \\\n";
     preamble += "        for (;;) \\\n";
