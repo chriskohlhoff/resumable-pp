@@ -271,7 +271,6 @@ private:
 
 //------------------------------------------------------------------------------
 // Class to visit the lambda body and build a database of all local members.
-// Replaces the text of each local variable in situ to reflect the new name.
 
 class resumable_lambda_locals:
   public RecursiveASTVisitor<resumable_lambda_locals>
@@ -283,13 +282,14 @@ public:
     std::string name;
     std::string full_name;
     int yield_id;
+    VarDecl* decl;
   };
 
   typedef std::vector<int> scope_path;
   typedef std::map<scope_path, local>::iterator iterator;
 
-  explicit resumable_lambda_locals(Rewriter& rewriter, LambdaExpr* expr)
-    : rewriter_(rewriter), lambda_expr_(expr)
+  explicit resumable_lambda_locals(LambdaExpr* expr)
+    : lambda_expr_(expr)
   {
   }
 
@@ -493,45 +493,11 @@ public:
       for (int scope: curr_scope_path_)
         full_name += "__s" + std::to_string(scope) + ".";
       full_name += name;
-      iterator iter = scope_to_local_.insert(std::make_pair(curr_scope_path_, local{type, name, full_name, yield_id}));
+      iterator iter = scope_to_local_.insert(std::make_pair(curr_scope_path_, local{type, name, full_name, yield_id, decl}));
       ptr_to_iter_[decl] = iter;
 
       if (decl->hasInit())
-      {
         yield_to_iter_[yield_id] = iter;
-
-        if (CXXConstructExpr* construct_expr = dyn_cast<CXXConstructExpr>(decl->getInit()))
-        {
-          std::string init = "new (static_cast<void*>(&" + full_name + ")) " + type + "(";
-          if (construct_expr->getNumArgs() > 0)
-            init += rewriter_.getRewrittenText(construct_expr->getParenOrBraceRange());
-          init += "), this->__state = " + std::to_string(yield_id);
-          rewriter_.ReplaceText(SourceRange(decl->getLocStart(), decl->getLocEnd()), init);
-        }
-        else if (ExprWithCleanups* expr = dyn_cast<ExprWithCleanups>(decl->getInit()))
-        {
-          if (CXXConstructExpr* construct_expr = dyn_cast<CXXConstructExpr>(expr->getSubExpr()))
-          {
-            if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(construct_expr->getArg(0)))
-            {
-              std::string init = "new (static_cast<void*>(&" + full_name + ")) " + type + "(";
-              init += rewriter_.getRewrittenText(SourceRange(temp->getLocStart(), temp->getLocEnd()));
-              init += "), this->__state = " + std::to_string(yield_id);
-              rewriter_.ReplaceText(SourceRange(decl->getLocStart(), decl->getLocEnd()), init);
-            }
-          }
-        }
-        else
-        {
-          SourceRange range(decl->getLocStart(), decl->getLocation());
-          rewriter_.ReplaceText(range, full_name);
-        }
-      }
-      else
-      {
-        SourceRange range(decl->getLocStart(), decl->getLocEnd());
-        rewriter_.ReplaceText(range, "this->__state = " + std::to_string(yield_id));
-      }
     }
 
     return result;
@@ -540,54 +506,6 @@ public:
   bool TraverseReturnStmt(ReturnStmt* stmt)
   {
     bool result = RecursiveASTVisitor<resumable_lambda_locals>::TraverseReturnStmt(stmt);
-
-    return result;
-  }
-
-  bool TraverseCXXThisExpr(CXXThisExpr* expr)
-  {
-    bool result = RecursiveASTVisitor<resumable_lambda_locals>::TraverseCXXThisExpr(expr);
-
-    for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
-    {
-      if (c->getCaptureKind() == LCK_This)
-      {
-        if (expr->isImplicit())
-        {
-          rewriter_.InsertTextBefore(expr->getLocStart(), "this->__capture.__this->");
-        }
-        else
-        {
-          SourceRange range(expr->getLocStart(), expr->getLocEnd());
-          rewriter_.ReplaceText(range, "this->__capture.__this");
-        }
-      }
-    }
-
-    return result;
-  }
-
-  bool TraverseDeclRefExpr(DeclRefExpr* expr)
-  {
-    bool result = RecursiveASTVisitor<resumable_lambda_locals>::TraverseDeclRefExpr(expr);
-
-    iterator iter = find(expr->getDecl());
-    if (iter != end())
-    {
-      rewriter_.ReplaceText(SourceRange(expr->getLocStart(), expr->getLocEnd()), iter->second.full_name);
-    }
-    else
-    {
-      for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
-      {
-        if (c->getCapturedVar() == expr->getDecl())
-        {
-          std::string var = rewriter_.getRewrittenText(SourceRange(expr->getLocStart(), expr->getLocEnd()));
-          rewriter_.ReplaceText(SourceRange(expr->getLocStart(), expr->getLocEnd()), "this->__capture." + var);
-          break;
-        }
-      }
-    }
 
     return result;
   }
@@ -609,7 +527,6 @@ private:
     return yield_id;
   }
 
-  Rewriter& rewriter_;
   LambdaExpr* lambda_expr_ = nullptr;
   scope_path curr_scope_path_;
   int next_scope_id_;
@@ -637,7 +554,7 @@ public:
     : rewriter_(r),
       lambda_expr_(expr),
       lambda_id_(next_lambda_id_++),
-      locals_(r, expr)
+      locals_(expr)
   {
   }
 
@@ -762,6 +679,100 @@ public:
       std::string unwind = "this->__unwind_to(" + std::to_string(locals_.getYieldId(stmt)) + ");}";
       auto end = Lexer::getLocForEndOfToken(stmt->getBody()->getLocEnd(), 0, rewriter_.getSourceMgr(), rewriter_.getLangOpts());
       rewriter_.InsertTextAfterToken(end, unwind);
+    }
+
+    return result;
+  }
+
+  bool TraverseVarDecl(VarDecl* decl)
+  {
+    bool result = RecursiveASTVisitor<resumable_lambda_codegen>::TraverseVarDecl(decl);
+
+    resumable_lambda_locals::iterator iter = locals_.find(decl);
+    if (iter != locals_.end())
+    {
+      if (decl->hasInit())
+      {
+        if (CXXConstructExpr* construct_expr = dyn_cast<CXXConstructExpr>(decl->getInit()))
+        {
+          std::string init = "new (static_cast<void*>(&" + iter->second.full_name + ")) " + iter->second.type + "(";
+          if (construct_expr->getNumArgs() > 0)
+            init += rewriter_.getRewrittenText(construct_expr->getParenOrBraceRange());
+          init += "), this->__state = " + std::to_string(iter->second.yield_id);
+          rewriter_.ReplaceText(SourceRange(decl->getLocStart(), decl->getLocEnd()), init);
+        }
+        else if (ExprWithCleanups* expr = dyn_cast<ExprWithCleanups>(decl->getInit()))
+        {
+          if (CXXConstructExpr* construct_expr = dyn_cast<CXXConstructExpr>(expr->getSubExpr()))
+          {
+            if (MaterializeTemporaryExpr* temp = dyn_cast<MaterializeTemporaryExpr>(construct_expr->getArg(0)))
+            {
+              std::string init = "new (static_cast<void*>(&" + iter->second.full_name + ")) " + iter->second.type + "(";
+              init += rewriter_.getRewrittenText(SourceRange(temp->getLocStart(), temp->getLocEnd()));
+              init += "), this->__state = " + std::to_string(iter->second.yield_id);
+              rewriter_.ReplaceText(SourceRange(decl->getLocStart(), decl->getLocEnd()), init);
+            }
+          }
+        }
+        else
+        {
+          SourceRange range(decl->getLocStart(), decl->getLocation());
+          rewriter_.ReplaceText(range, iter->second.full_name);
+        }
+      }
+      else
+      {
+        SourceRange range(decl->getLocStart(), decl->getLocEnd());
+        rewriter_.ReplaceText(range, "this->__state = " + std::to_string(iter->second.yield_id));
+      }
+    }
+
+    return result;
+  }
+
+  bool TraverseCXXThisExpr(CXXThisExpr* expr)
+  {
+    bool result = RecursiveASTVisitor<resumable_lambda_codegen>::TraverseCXXThisExpr(expr);
+
+    for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
+    {
+      if (c->getCaptureKind() == LCK_This)
+      {
+        if (expr->isImplicit())
+        {
+          rewriter_.InsertTextBefore(expr->getLocStart(), "this->__capture.__this->");
+        }
+        else
+        {
+          SourceRange range(expr->getLocStart(), expr->getLocEnd());
+          rewriter_.ReplaceText(range, "this->__capture.__this");
+        }
+      }
+    }
+
+    return result;
+  }
+
+  bool TraverseDeclRefExpr(DeclRefExpr* expr)
+  {
+    bool result = RecursiveASTVisitor<resumable_lambda_codegen>::TraverseDeclRefExpr(expr);
+
+    resumable_lambda_locals::iterator iter = locals_.find(expr->getDecl());
+    if (iter != locals_.end())
+    {
+      rewriter_.ReplaceText(SourceRange(expr->getLocStart(), expr->getLocEnd()), iter->second.full_name);
+    }
+    else
+    {
+      for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
+      {
+        if (c->getCapturedVar() == expr->getDecl())
+        {
+          std::string var = rewriter_.getRewrittenText(SourceRange(expr->getLocStart(), expr->getLocEnd()));
+          rewriter_.ReplaceText(SourceRange(expr->getLocStart(), expr->getLocEnd()), "this->__capture." + var);
+          break;
+        }
+      }
     }
 
     return result;
