@@ -150,9 +150,28 @@ public:
   {
   }
 
+  bool IsResumable(FunctionDecl* decl) const
+  {
+    return resumable_functions_.find(decl) != resumable_functions_.end();
+  }
+
+  bool IsResumableStatement(Stmt* stmt) const
+  {
+    return resumable_statements_.find(stmt) != resumable_statements_.end();
+  }
+
   bool shouldVisitTemplateInstantiations() const
   {
     return true;
+  }
+
+  bool TraverseStmt(Stmt* stmt)
+  {
+    Stmt* prev_stmt = current_stmt_;
+    current_stmt_ = stmt;
+    bool result = RecursiveASTVisitor<resumable_function_detector>::TraverseStmt(stmt);
+    current_stmt_ = prev_stmt;
+    return result;
   }
 
   bool TraverseLambdaExpr(LambdaExpr* expr)
@@ -200,21 +219,28 @@ public:
 
   bool VisitCallExpr(CallExpr* expr)
   {
-    if (!function_stack_.empty())
+    if (Decl* decl = expr->getDirectCallee())
     {
-      if (Decl* decl = expr->getDirectCallee())
+      if (FunctionDecl* callee = dyn_cast<FunctionDecl>(decl->getCanonicalDecl()))
+      {
+        if (!function_stack_.empty())
+          callers_.insert(std::make_pair(callee, function_stack_.back()));
+        calling_statements_.insert(std::make_pair(callee, current_stmt_));
+        return true;
+      }
+    }
+
+    if (BlockExpr* block = dyn_cast<BlockExpr>(expr->getCallee()->IgnoreParenImpCasts()))
+    {
+      if (Decl* decl = dyn_cast<FunctionDecl>(block->getBlockDecl()))
       {
         if (FunctionDecl* callee = dyn_cast<FunctionDecl>(decl->getCanonicalDecl()))
         {
-          callers_.insert(std::make_pair(callee, function_stack_.back()));
-          return true;
+          if (!function_stack_.empty())
+            callers_.insert(std::make_pair(callee, function_stack_.back()));
+          calling_statements_.insert(std::make_pair(callee, current_stmt_));
         }
       }
-
-      if (BlockExpr* block = dyn_cast<BlockExpr>(expr->getCallee()->IgnoreParenImpCasts()))
-        if (Decl* decl = dyn_cast<FunctionDecl>(block->getBlockDecl()))
-          if (FunctionDecl* callee = dyn_cast<FunctionDecl>(decl->getCanonicalDecl()))
-            callers_.insert(std::make_pair(callee, function_stack_.back()));
     }
 
     return true;
@@ -225,18 +251,18 @@ public:
     std::vector<FunctionDecl*> resumables(resumable_functions_.begin(), resumable_functions_.end());
     for (auto decl : resumables)
       CheckAndAddCallers(decl);
+    for (auto decl : resumables)
+    {
+      auto range = calling_statements_.equal_range(decl);
+      for (auto iter = range.first; iter != range.second; ++iter)
+        resumable_statements_.insert(iter->second);
+    }
   }
 
 private:
   void CheckAndAdd(FunctionDecl* decl, const char* error)
   {
-    if (decl->isInlined())
-    {
-      resumable_functions_.insert(decl);
-      return;
-    }
-
-    if (decl->isTemplateInstantiation())
+    if (decl->isInlined() || decl->isTemplateInstantiation())
     {
       resumable_functions_.insert(decl);
       return;
@@ -267,6 +293,9 @@ private:
   std::vector<FunctionDecl*> function_stack_;
   std::unordered_set<FunctionDecl*> resumable_functions_;
   std::unordered_multimap<FunctionDecl*, FunctionDecl*> callers_;
+  std::unordered_multimap<FunctionDecl*, Stmt*> calling_statements_;
+  std::unordered_set<Stmt*> resumable_statements_;
+  Stmt* current_stmt_ = nullptr;
 };
 
 //------------------------------------------------------------------------------
@@ -365,6 +394,12 @@ public:
     return iter != yield_is_variable_.end() ? iter->second : false;
   }
 
+  bool stmtHasLocals(Stmt* stmt)
+  {
+    auto iter = stmt_has_locals_.find(stmt);
+    return iter != stmt_has_locals_.end() ? iter->second : false;
+  }
+
   std::string getSubGenerator(int yield_id)
   {
     auto iter = yield_to_subgen_.find(yield_id);
@@ -382,6 +417,7 @@ public:
     for (CompoundStmt::body_iterator b = stmt->body_begin(), e = stmt->body_end(); b != e; ++b)
       TraverseStmt(*b);
 
+    stmt_has_locals_[stmt] = curr_scope_yield_id_ != enclosing_scope_yield_id;
     curr_scope_yield_id_ = enclosing_scope_yield_id;
     curr_scope_path_.pop_back();
     next_scope_id_ = curr_scope_id + 1;
@@ -415,8 +451,11 @@ public:
     if (stmt->getInc())
       TraverseStmt(stmt->getInc());
 
+    int enclosing_scope_yield_id_2 = curr_scope_yield_id_;
     TraverseStmt(stmt->getBody());
+    stmt_has_locals_[stmt->getBody()] = curr_scope_yield_id_ != enclosing_scope_yield_id_2;
 
+    stmt_has_locals_[stmt] = curr_scope_yield_id_ != enclosing_scope_yield_id;
     curr_scope_yield_id_ = enclosing_scope_yield_id;
     curr_scope_path_.pop_back();
     curr_scope_path_.pop_back();
@@ -431,6 +470,7 @@ public:
     curr_scope_path_.push_back(curr_scope_id);
     next_scope_id_ = 0;
     int enclosing_scope_yield_id = curr_scope_yield_id_;
+    ptr_to_yield_[stmt] = enclosing_scope_yield_id;
 
     if (stmt->getCond())
       TraverseStmt(stmt->getCond());
@@ -438,8 +478,11 @@ public:
     curr_scope_path_.push_back(next_scope_id_);
     next_scope_id_ = 0;
 
+    int enclosing_scope_yield_id_2 = curr_scope_yield_id_;
     TraverseStmt(stmt->getBody());
+    stmt_has_locals_[stmt->getBody()] = curr_scope_yield_id_ != enclosing_scope_yield_id_2;
 
+    stmt_has_locals_[stmt] = curr_scope_yield_id_ != enclosing_scope_yield_id;
     curr_scope_yield_id_ = enclosing_scope_yield_id;
     curr_scope_path_.pop_back();
     curr_scope_path_.pop_back();
@@ -454,6 +497,7 @@ public:
     curr_scope_path_.push_back(curr_scope_id);
     next_scope_id_ = 0;
     int enclosing_scope_yield_id = curr_scope_yield_id_;
+    ptr_to_yield_[stmt] = enclosing_scope_yield_id;
 
     if (stmt->getCond())
       TraverseStmt(stmt->getCond());
@@ -470,6 +514,7 @@ public:
 
     TraverseStmt(stmt->getElse());
 
+    stmt_has_locals_[stmt] = curr_scope_yield_id_ != enclosing_scope_yield_id;
     curr_scope_yield_id_ = enclosing_scope_yield_id;
     curr_scope_path_.pop_back();
     curr_scope_path_.pop_back();
@@ -535,6 +580,7 @@ private:
   std::multimap<scope_path, local> scope_to_local_;
   std::unordered_map<void*, iterator> ptr_to_iter_;
   std::unordered_map<void*, int> ptr_to_yield_;
+  std::unordered_map<Stmt*, bool> stmt_has_locals_;
   std::unordered_map<int, iterator> yield_to_iter_;
   std::unordered_map<int, int> yield_to_prior_yield_;
   std::set<std::pair<int, int>> is_reachable_yield_;
@@ -550,8 +596,9 @@ class resumable_lambda_codegen :
   public RecursiveASTVisitor<resumable_lambda_codegen>
 {
 public:
-  resumable_lambda_codegen(Rewriter& r, LambdaExpr* expr)
+  resumable_lambda_codegen(Rewriter& r, resumable_function_detector& d, LambdaExpr* expr)
     : rewriter_(r),
+      resumable_detector_(d),
       lambda_expr_(expr),
       lambda_id_(next_lambda_id_++),
       locals_(expr)
@@ -632,16 +679,22 @@ public:
     rewriter_.ReplaceText(afterBody, after.str());
   }
 
+  bool TraverseStmt(Stmt* stmt)
+  {
+    // TODO if (resumable_detector_.IsResumableStatement(stmt))
+    return RecursiveASTVisitor<resumable_lambda_codegen>::TraverseStmt(stmt);
+  }
+
   bool TraverseCompoundStmt(CompoundStmt* stmt)
   {
-    if (stmt != lambda_expr_->getBody())
+    if (stmt != lambda_expr_->getBody() && locals_.stmtHasLocals(stmt))
     {
       rewriter_.InsertTextBefore(stmt->getLocStart(), "{");
     }
 
     bool result = RecursiveASTVisitor<resumable_lambda_codegen>::TraverseCompoundStmt(stmt);
 
-    if (stmt != lambda_expr_->getBody())
+    if (stmt != lambda_expr_->getBody() && locals_.stmtHasLocals(stmt))
     {
       std::string unwind = "this->__unwind_to(" + std::to_string(locals_.getYieldId(stmt)) + ");}";
       auto end = Lexer::getLocForEndOfToken(stmt->getLocEnd(), 0, rewriter_.getSourceMgr(), rewriter_.getLangOpts());
@@ -667,14 +720,14 @@ public:
       return RecursiveASTVisitor<resumable_lambda_codegen>::TraverseForStmt(stmt);
     }
 
-    if (stmt->getInit())
+    if (stmt->getInit() && locals_.stmtHasLocals(stmt))
     {
       rewriter_.InsertTextBefore(stmt->getLocStart(), "{");
     }
 
     bool result = RecursiveASTVisitor<resumable_lambda_codegen>::TraverseForStmt(stmt);
 
-    if (stmt->getInit())
+    if (stmt->getInit() && locals_.stmtHasLocals(stmt))
     {
       std::string unwind = "this->__unwind_to(" + std::to_string(locals_.getYieldId(stmt)) + ");}";
       auto end = Lexer::getLocForEndOfToken(stmt->getBody()->getLocEnd(), 0, rewriter_.getSourceMgr(), rewriter_.getLangOpts());
@@ -776,6 +829,17 @@ public:
     }
 
     return result;
+  }
+
+  bool TraverseCallExpr(CallExpr* expr)
+  {
+    FunctionDecl* callee = expr->getDirectCallee();
+    if (!callee || !resumable_detector_.IsResumable(callee))
+      return RecursiveASTVisitor<resumable_lambda_codegen>::TraverseCallExpr(expr);
+
+    llvm::errs() << "Found one!\n";
+
+    return true;
   }
 
   bool VisitReturnStmt(ReturnStmt* stmt)
@@ -1063,6 +1127,7 @@ private:
   }
 
   Rewriter& rewriter_;
+  resumable_function_detector& resumable_detector_;
   LambdaExpr* lambda_expr_;
   int lambda_id_;
   static int next_lambda_id_;
@@ -1077,14 +1142,15 @@ int resumable_lambda_codegen::next_lambda_id_ = 0;
 class codegen_visitor : public RecursiveASTVisitor<codegen_visitor>
 {
 public:
-  codegen_visitor(Rewriter& r)
-    : rewriter_(r)
+  codegen_visitor(Rewriter& r, resumable_function_detector& d)
+    : rewriter_(r),
+      resumable_detector_(d)
   {
   }
 
   bool VisitLambdaExpr(LambdaExpr* expr)
   {
-    resumable_lambda_codegen(rewriter_, expr).Generate();
+    resumable_lambda_codegen(rewriter_, resumable_detector_, expr).Generate();
     return true;
   }
 
@@ -1097,6 +1163,7 @@ public:
 
 private:
   Rewriter& rewriter_;
+  resumable_function_detector& resumable_detector_;
 };
 
 //------------------------------------------------------------------------------
@@ -1107,7 +1174,7 @@ class consumer : public ASTConsumer
 public:
   consumer(Rewriter& r)
     : resumable_detector_(r.getSourceMgr()),
-      codegen_(r)
+      codegen_(r, resumable_detector_)
   {
   }
 
