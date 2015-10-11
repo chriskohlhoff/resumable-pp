@@ -555,12 +555,12 @@ public:
       {
         if (expr->isImplicit())
         {
-          rewriter_.InsertTextBefore(expr->getLocStart(), "this->__this->");
+          rewriter_.InsertTextBefore(expr->getLocStart(), "this->__capture.__this->");
         }
         else
         {
           SourceRange range(expr->getLocStart(), expr->getLocEnd());
-          rewriter_.ReplaceText(range, "this->__this");
+          rewriter_.ReplaceText(range, "this->__capture.__this");
         }
       }
     }
@@ -584,7 +584,7 @@ public:
         if (c->getCapturedVar() == expr->getDecl())
         {
           std::string var = rewriter_.getRewrittenText(SourceRange(expr->getLocStart(), expr->getLocEnd()));
-          rewriter_.ReplaceText(SourceRange(expr->getLocStart(), expr->getLocEnd()), "this->" + var);
+          rewriter_.ReplaceText(SourceRange(expr->getLocStart(), expr->getLocEnd()), "this->__capture." + var);
           break;
         }
       }
@@ -657,41 +657,28 @@ public:
     before << "/*BEGIN RESUMABLE LAMBDA DEFINITION*/\n\n";
     before << "[&]{\n";
     EmitCaptureTypedefs(before);
-    before << "  struct __resumable_lambda_" << lambda_id_ << "_capture\n";
+    before << "  struct __resumable_lambda_" << lambda_id_ << "\n";
     before << "  {\n";
-    EmitCaptureConstructor(before);
-    EmitCaptureMembers(before);
-    before << "  };\n";
+    EmitCaptureDataMembers(before);
     before << "\n";
-    before << "  struct __resumable_lambda_" << lambda_id_ << ";\n";
-    before << "\n";
-    before << "  struct __resumable_lambda_" << lambda_id_ << "_initializer\n";
-    before << "  {\n";
-    before << "    typedef __resumable_lambda_" << lambda_id_ << " lambda __RESUMABLE_UNUSED_TYPEDEF;\n";
-    before << "    __resumable_lambda_" << lambda_id_ << "_capture __capture;\n";
-    before << "  };\n";
-    before << "\n";
-    before << "  struct __resumable_lambda_" << lambda_id_ << " :\n";
-    before << "    private __resumable_lambda_" << lambda_id_ << "_capture\n";
-    before << "  {\n";
     EmitLocalsDataMembers(before);
     before << "\n";
-    EmitLocalsDataUnwindTo(before);
-    before << "\n";
-    before << "    __resumable_lambda_" << lambda_id_ << "(const __resumable_lambda_" << lambda_id_ << "&) = delete;\n";
-    before << "    __resumable_lambda_" << lambda_id_ << "(__resumable_lambda_" << lambda_id_ << "&&) = delete;\n";
-    before << "    __resumable_lambda_" << lambda_id_ << "& operator=(__resumable_lambda_" << lambda_id_ << "&&) = delete;\n";
-    before << "    __resumable_lambda_" << lambda_id_ << "& operator=(const __resumable_lambda_" << lambda_id_ << "&) = delete;\n";
-    before << "    ~__resumable_lambda_" << lambda_id_ << "() { this->__unwind_to(-1); }\n";
+    before << "    struct initializer\n";
+    before << "    {\n";
+    before << "      typedef __resumable_lambda_" << lambda_id_ << " lambda __RESUMABLE_UNUSED_TYPEDEF;\n";
+    before << "      __capture_t __capture;\n";
+    before << "    };\n";
     before << "\n";
     EmitConstructor(before);
     before << "\n";
-    before << "    typedef __resumable_lambda_" << lambda_id_ << "_initializer initializer __RESUMABLE_UNUSED_TYPEDEF;\n";
+    before << "    __resumable_lambda_" << lambda_id_ << "(const __resumable_lambda_" << lambda_id_ << "&) = delete;\n";
+    before << "    __resumable_lambda_" << lambda_id_ << "& operator=(__resumable_lambda_" << lambda_id_ << "&&) = delete;\n";
     before << "\n";
-    before << "    __resumable_lambda_" << lambda_id_ << "_initializer operator*() &&\n";
-    before << "    {\n";
-    before << "      return { static_cast<__resumable_lambda_" << lambda_id_ << "_capture&&>(*this) };\n";
-    before << "    }\n";
+    before << "    ~__resumable_lambda_" << lambda_id_ << "() { this->__unwind_to(-1); }\n";
+    before << "\n";
+    EmitLocalsDataUnwindTo(before);
+    before << "\n";
+    before << "    initializer operator*() && { return { static_cast<__capture_t&&>(__capture) }; }\n";
     before << "\n";
     before << "    bool ready() const noexcept { return this->__state == -1; }\n";
     before << "\n";
@@ -823,73 +810,26 @@ private:
       os << "\n";
   }
 
-  void EmitCaptureConstructor(std::ostream& os)
+  void EmitCaptureDataMembers(std::ostream& os)
   {
-    os << "    explicit __resumable_lambda_" << lambda_id_ << "_capture(__resumable_dummy_arg";
-    for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
-    {
-      os << ",\n";
-      if (c->getCaptureKind() == LCK_This)
-        os << "        __resumable_lambda_" << lambda_id_ << "_this_type __capture_arg_this";
-      else if (c->isInitCapture())
-      {
-        std::string name = c->getCapturedVar()->getDeclName().getAsString();
-        os << "        __resumable_lambda_" << lambda_id_ << "_" << name << "_type&& __capture_arg_" << name;
-      }
-      else if (c->getCaptureKind() == LCK_ByRef)
-      {
-        std::string name = c->getCapturedVar()->getDeclName().getAsString();
-        os << "        __resumable_lambda_" << lambda_id_ << "_" << name << "_type& __capture_arg_" << name;
-      }
-      else
-      {
-        std::string name = c->getCapturedVar()->getDeclName().getAsString();
-        os << "        const __resumable_lambda_" << lambda_id_ << "_" << name << "_type& __capture_arg_" << name;
-      }
-    }
-    os << ")";
-    for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
-    {
-      os << (c == lambda_expr_->capture_begin() ? " :\n" : ",\n");
-      if (c->getCaptureKind() == LCK_This)
-      {
-        os << "      __this(__capture_arg_this)";
-      }
-      else if (c->isInitCapture())
-      {
-        std::string name = c->getCapturedVar()->getDeclName().getAsString();
-        os << "      " << name << "(static_cast<__resumable_lambda_" << lambda_id_ << "_" << name << "_type&&>(__capture_arg_" << name << "))";
-      }
-      else
-      {
-        std::string name = c->getCapturedVar()->getDeclName().getAsString();
-        os << "      " << name << "(__capture_arg_" << name << ")";
-      }
-    }
-    os << "\n";
+    os << "    struct __capture_t\n";
     os << "    {\n";
-    os << "    }\n";
-  }
-
-  void EmitCaptureMembers(std::ostream& os)
-  {
     for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
     {
-      if (c == lambda_expr_->capture_begin())
-        os << "\n";
       if (c->getCaptureKind() == LCK_This)
       {
-        os << "    __resumable_lambda_" << lambda_id_ << "_this_type __this;\n";
+        os << "      __resumable_lambda_" << lambda_id_ << "_this_type __this;\n";
       }
       else
       {
         std::string name = c->getCapturedVar()->getDeclName().getAsString();
-        os << "    __resumable_lambda_" << lambda_id_ << "_" << name << "_type";
+        os << "      __resumable_lambda_" << lambda_id_ << "_" << name << "_type";
         if (c->getCaptureKind() == LCK_ByRef)
           os << "&";
         os << " " << name << ";\n";
       }
     }
+    os << "    } __capture;\n";
   }
 
   void EmitLocalsDataMembers(std::ostream& os)
@@ -973,10 +913,10 @@ private:
 
   void EmitConstructor(std::ostream& os)
   {
-    os << "    __resumable_lambda_" << lambda_id_ << "(__resumable_dummy_arg";
+    os << "    __resumable_lambda_" << lambda_id_ << "(";
     for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
     {
-      os << ",\n";
+      os << (c == lambda_expr_->capture_begin() ? "\n" : ",\n");
       if (c->getCaptureKind() == LCK_This)
       {
         os << "        __resumable_lambda_" << lambda_id_ << "_this_type __capture_arg_this";
@@ -998,17 +938,17 @@ private:
         os << "        const __resumable_lambda_" << lambda_id_ << "_" << name << "_type& __capture_arg_" << name;
       }
     }
-    os << ") :\n";
-    os << "      __resumable_lambda_" << lambda_id_ << "_capture(__resumable_dummy_arg()";
+    os << ")\n";
+    os << "      : __capture{";
     for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
     {
-      os << ",\n";
+      os << (c == lambda_expr_->capture_begin() ? "\n" : ",\n");
       if (c->getCaptureKind() == LCK_This)
-        os << "          __capture_arg_this";
+        os << "        __capture_arg_this";
       else if (c->isInitCapture())
       {
         std::string name = c->getCapturedVar()->getDeclName().getAsString();
-        os << "          static_cast<__resumable_lambda_" << lambda_id_ << "_" << name << "_type&&>(__capture_arg_" << name << ")";
+        os << "        static_cast<__resumable_lambda_" << lambda_id_ << "_" << name << "_type&&>(__capture_arg_" << name << ")";
       }
       else
       {
@@ -1016,13 +956,12 @@ private:
         os << "          __capture_arg_" << name;
       }
     }
-    os << ")\n";
+    os << "}\n";
     os << "    {\n";
     os << "    }\n";
     os << "\n";
-    os << "    __resumable_lambda_" << lambda_id_ << "(__resumable_lambda_" << lambda_id_ << "_initializer&& __init) :\n";
-    os << "      __resumable_lambda_" << lambda_id_ << "_capture(\n";
-    os << "          static_cast<__resumable_lambda_" << lambda_id_ << "_capture&&>(__init.__capture))\n";
+    os << "    __resumable_lambda_" << lambda_id_ << "(initializer&& __init) :\n";
+    os << "      __capture(static_cast<__capture_t&&>(__init.__capture))\n";
     os << "    {\n";
     os << "    }\n";
   }
@@ -1031,10 +970,10 @@ private:
   {
     os << "  struct __resumable_lambda_" << lambda_id_ << "_factory\n";
     os << "  {\n";
-    os << "    __resumable_lambda_" << lambda_id_ << " operator()(__resumable_dummy_arg";
+    os << "    __resumable_lambda_" << lambda_id_ << " operator()(";
     for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
     {
-      os << ",\n";
+      os << (c == lambda_expr_->capture_begin() ? "\n" : ",\n");
       if (c->getCaptureKind() == LCK_This)
       {
         os << "        __resumable_lambda_" << lambda_id_ << "_this_type __capture_arg_this";
@@ -1058,11 +997,10 @@ private:
     }
     os << ")\n";
     os << "    {\n";
-    os << "      return {\n";
-    os << "        __resumable_dummy_arg()";
+    os << "      return {";
     for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
     {
-      os << ",\n";
+      os << (c == lambda_expr_->capture_begin() ? "\n" : ",\n");
       if (c->getCaptureKind() == LCK_This)
         os << "        __capture_arg_this";
       else if (c->isInitCapture())
@@ -1086,10 +1024,11 @@ private:
 
   void EmitCreation(std::ostream& os)
   {
-    os << "(__resumable_dummy_arg()";
+    os << "(";
     for (LambdaExpr::capture_iterator c = lambda_expr_->capture_begin(), e = lambda_expr_->capture_end(); c != e; ++c)
     {
-      os << ", ";
+      if (c != lambda_expr_->capture_begin())
+        os << ", ";
       if (c->getCaptureKind() == LCK_This)
         os << "this";
       else if (c->isInitCapture())
@@ -1226,8 +1165,6 @@ public:
     preamble += "#ifndef __RESUMABLE_UNUSED_TYPEDEF\n";
     preamble += "# define __RESUMABLE_UNUSED_TYPEDEF\n";
     preamble += "#endif\n";
-    preamble += "\n";
-    preamble += "struct __resumable_dummy_arg {};\n";
     preamble += "\n";
     preamble += "template <class _T>\n";
     preamble += "inline auto ready(const _T& __t) noexcept -> decltype(__t.ready())\n";
