@@ -15,7 +15,7 @@ int main()
 
   auto&& lazy_h = [=] resumable -> heavy* {
     for (heavy h(text);;)
-      co_yield return &h;
+      co_yield &h;
   };
 
   printf("before use\n");

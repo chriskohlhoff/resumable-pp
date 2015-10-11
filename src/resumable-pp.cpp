@@ -58,9 +58,8 @@ template <class _T> __initializer<_T> lambda_initializer(_T __t) { return __init
 template <class _T> using initializer_lambda = typename _T::lambda;
 
 #define resumable () __attribute__((__annotate__("resumable"))) mutable
-#define co_yield for ((void)__co_yield;;)
-#define co_suspend for ((void)__co_yield;;)
-#define break_resumable for ((void)__co_yield;;)
+#define co_yield for ((void)__co_yield;;) throw
+#define break_resumable for ((void)__co_yield;;) throw
 
 )-";
 
@@ -684,21 +683,13 @@ public:
     before << "\n";
     before << "    auto resume()\n";
     before << "    {\n";
-    before << "      struct __on_exit_t\n";
-    before << "      {\n";
-    before << "        __resumable_lambda_" << lambda_id_ << "* __this;\n";
-    before << "        ~__on_exit_t() { if (__this) __this->__unwind_to(-1); }\n";
-    before << "      } __on_exit{this};\n";
-    before << "\n";
+    before << "      __on_exit_t __on_exit{this};\n";
     before << "      switch (this->__state)\n";
     before << "        if (0)\n";
     before << "        {\n";
     for (int yield_id = 0; yield_id <= locals_.getLastYieldId(); ++yield_id)
       if (!locals_.isVariable(yield_id))
         before << "          case " << yield_id << ": goto __yield_point_" << yield_id << ";\n";
-    before << "          goto __terminate; __terminate:\n";
-    before << "          this->__unwind_to(-1);\n";
-    before << "          goto __suspend; __suspend:\n";
     before << "          default: (void)0;\n";
     before << "        }\n";
     before << "        else __yield_point_0:\n";
@@ -909,6 +900,12 @@ private:
     os << "        }\n";
     os << "      }\n";
     os << "    }\n";
+    os << "\n";
+    os << "    struct __on_exit_t\n";
+    os << "    {\n";
+    os << "      __resumable_lambda_" << lambda_id_ << "* __this;\n";
+    os << "      ~__on_exit_t() { if (__this) __this->__unwind_to(-1); }\n";
+    os << "    };\n";
   }
 
   void EmitConstructor(std::ostream& os)
@@ -1191,19 +1188,10 @@ public:
     preamble += "    if (0) \\\n";
     preamble += "      __yield_point_ ## n: break; \\\n";
     preamble += "    else \\\n";
-    preamble += "      switch (0) \\\n";
-    preamble += "        for (;;) \\\n";
-    preamble += "          if (1) \\\n";
-    preamble += "            goto __terminate; \\\n";
-    preamble += "          else \\\n";
-    preamble += "            for (;;) \\\n";
-    preamble += "              if (1) \\\n";
-    preamble += "                goto __suspend; \\\n";
-    preamble += "            else case 0:\n";
+    preamble += "      return\n";
     preamble += "\n";
-    preamble += "#define co_yield for (;;)\n";
-    preamble += "#define co_suspend for (;;)\n";
-    preamble += "#define break_resumable for (;;)\n";
+    preamble += "#define co_yield for (;;) throw\n";
+    preamble += "#define break_resumable for (;;) throw\n";
     preamble += "\n";
     preamble += "#endif // __RESUMABLE_PREAMBLE\n";
     preamble += "\n";
