@@ -1,0 +1,7 @@
+before call
+heavy(foo)
+after call
+heavy(const heavy&)
+here we are
+~heavy()
+~heavy()

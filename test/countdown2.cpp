@@ -11,5 +11,8 @@ int main()
   };
 
   while (!ready(f))
-    printf("%d\n", f());
+  {
+    int n = resume(f);
+    printf("%d\n", ready(f) ? result(f) : n);
+  }
 }

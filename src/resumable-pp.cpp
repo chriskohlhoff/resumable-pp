@@ -624,6 +624,8 @@ public:
     before << "\n";
     EmitLocalsDataMembers(before);
     before << "\n";
+    EmitReturnValueMembers(before);
+    before << "\n";
     before << "    struct initializer\n";
     before << "    {\n";
     before << "      typedef __resumable_lambda_" << lambda_id_ << " lambda __RESUMABLE_UNUSED_TYPEDEF;\n";
@@ -635,13 +637,15 @@ public:
     before << "    __resumable_lambda_" << lambda_id_ << "(const __resumable_lambda_" << lambda_id_ << "&) = delete;\n";
     before << "    __resumable_lambda_" << lambda_id_ << "& operator=(__resumable_lambda_" << lambda_id_ << "&&) = delete;\n";
     before << "\n";
-    before << "    ~__resumable_lambda_" << lambda_id_ << "() { this->__unwind_to(-1); }\n";
+    EmitDestructor(before);
     before << "\n";
     EmitLocalsDataUnwindTo(before);
     before << "\n";
     before << "    initializer operator*() && { return { static_cast<__capture_t&&>(__capture) }; }\n";
     before << "\n";
     before << "    bool ready() const noexcept { return this->__state == -1; }\n";
+    before << "\n";
+    EmitResult(before);
     before << "\n";
     before << "    auto resume()\n";
     before << "    {\n";
@@ -652,9 +656,9 @@ public:
     for (int yield_id = 0; yield_id <= locals_.getLastYieldId(); ++yield_id)
       if (!locals_.isVariable(yield_id))
         before << "          case " << yield_id << ": goto __yield_point_" << yield_id << ";\n";
-    before << "          default: (void)0;\n";
+    before << "          default: goto __exit;\n";
     before << "        }\n";
-    before << "        else __yield_point_0:\n";
+    before << "    __yield_point_0:\n";
     before << "\n";
     EmitLineNumber(before, body->getLocStart());
     rewriter_.ReplaceText(beforeBody, before.str());
@@ -663,6 +667,7 @@ public:
 
     std::stringstream after;
     after << "\n";
+    after << "    __exit: (void)0;\n";
     after << "    }\n";
     after << "\n";
     after << "    auto operator()() { return resume(); }\n";
@@ -840,8 +845,18 @@ public:
     return true;
   }
 
-  bool VisitReturnStmt(ReturnStmt* stmt)
+  bool TraverseReturnStmt(ReturnStmt* stmt)
   {
+    rewriter_.InsertTextBefore(stmt->getLocStart(), "__");
+    RecursiveASTVisitor<resumable_lambda_codegen>::TraverseReturnStmt(stmt);
+    std::string result_type = lambda_expr_->getCallOperator()->getReturnType().getAsString();
+    if (result_type != "void")
+    {
+      Expr* return_value = stmt->getRetValue();
+      rewriter_.InsertTextBefore(return_value->getLocStart(), "new (&__result) result_type(");
+      auto end = Lexer::getLocForEndOfToken(return_value->getLocEnd(), 0, rewriter_.getSourceMgr(), rewriter_.getLangOpts());
+      rewriter_.InsertTextAfter(end, "), __result_constructed = true");
+    }
     return true;
   }
 
@@ -936,6 +951,45 @@ private:
       curr_path.pop_back();
     }
     os << "    };\n";
+  }
+
+  void EmitReturnValueMembers(std::ostream& os)
+  {
+    std::string result_type = lambda_expr_->getCallOperator()->getReturnType().getAsString();
+    os << "    typedef " << result_type << " result_type __RESUMABLE_UNUSED_TYPEDEF;\n";
+    if (result_type != "void")
+    {
+      os << "\n";
+      os << "    bool __result_constructed = false;\n";
+      os << "    union\n";
+      os << "    {\n";
+      os << "      result_type __result;\n";
+      os << "    };\n";
+    }
+  }
+
+  void EmitDestructor(std::ostream& os)
+  {
+    std::string result_type = lambda_expr_->getCallOperator()->getReturnType().getAsString();
+    os << "    ~__resumable_lambda_" << lambda_id_ << "()\n";
+    os << "    {\n";
+    os << "      this->__unwind_to(-1);\n";
+    if (result_type != "void")
+    {
+      os << "      if (__result_constructed)\n";
+      os << "        __result.~result_type();\n";
+    }
+    os << "    }\n";
+  }
+
+  void EmitResult(std::ostream& os)
+  {
+    std::string result_type = lambda_expr_->getCallOperator()->getReturnType().getAsString();
+    os << "    result_type result()\n";
+    os << "    {\n";
+    if (result_type != "void")
+      os << "      return static_cast<result_type&&>(__result);\n";
+    os << "    }\n";
   }
 
   void EmitLocalsDataUnwindTo(std::ostream& os)
@@ -1285,6 +1339,13 @@ public:
     preamble += "      __yield_point_ ## n: break; \\\n";
     preamble += "    else \\\n";
     preamble += "      return\n";
+    preamble += "\n";
+    preamble += "#define __return \\\n";
+    preamble += "  switch (0) \\\n";
+    preamble += "    for (;;) \\\n";
+    preamble += "      if (1) \\\n";
+    preamble += "        goto __exit; \\\n";
+    preamble += "      else case 0:\n";
     preamble += "\n";
     if (stackful)
     {
