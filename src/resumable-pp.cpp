@@ -54,6 +54,7 @@ struct __initializer : _T
 };
 
 template <class _T> bool ready(const _T&) noexcept { return false; }
+template <class _T> auto result(_T& __t) noexcept { return __t(); }
 template <class _T> auto resume(_T& __t) { return __t(); }
 template <class _T> __initializer<_T> lambda_initializer(_T __t) { return __initializer<_T>(static_cast<_T&&>(__t)); }
 template <class _T> using initializer_lambda = typename _T::lambda;
@@ -1259,6 +1260,12 @@ public:
     preamble += "}\n";
     preamble += "\n";
     preamble += "template <class _T>\n";
+    preamble += "inline auto result(_T& __t) noexcept -> decltype(__t.result())\n";
+    preamble += "{\n";
+    preamble += "  return __t.result();\n";
+    preamble += "}\n";
+    preamble += "\n";
+    preamble += "template <class _T>\n";
     preamble += "inline auto resume(_T& __t) -> decltype(__t.resume())\n";
     preamble += "{\n";
     preamble += "  return __t.resume();\n";
@@ -1295,13 +1302,52 @@ public:
       preamble += "  return r;\n";
       preamble += "}\n";
       preamble += "\n";
+      preamble += "template <class _R>\n";
+      preamble += "struct __resumable_result\n";
+      preamble += "{\n";
+      preamble += "  union { _R __value; };\n";
+      preamble += "  bool __constructed = false;\n";
+      preamble += "\n";
+      preamble += "  __resumable_result() {}\n";
+      preamble += "\n";
+      preamble += "  ~__resumable_result()\n";
+      preamble += "  {\n";
+      preamble += "    if (__constructed)\n";
+      preamble += "      __value.~_R();\n";
+      preamble += "  }\n";
+      preamble += "\n";
+      preamble += "  template <class _F>\n";
+      preamble += "  void __run(_F& __f)\n";
+      preamble += "  {\n";
+      preamble += "    new (&__value) _R(__f());\n";
+      preamble += "    __constructed = true;\n";
+      preamble += "  }\n";
+      preamble += "\n";
+      preamble += "  _R __get() { return static_cast<_R&&>(__value); }\n";
+      preamble += "};\n";
+      preamble += "\n";
+      preamble += "template <>\n";
+      preamble += "struct __resumable_result<void>\n";
+      preamble += "{\n";
+      preamble += "  template <class _F>\n";
+      preamble += "  void __run(_F& __f)\n";
+      preamble += "  {\n";
+      preamble += "    __f();\n";
+      preamble += "  }\n";
+      preamble += "\n";
+      preamble += "  void __get() {}\n";
+      preamble += "};\n";
+      preamble += "\n";
       preamble += "template <class _F>\n";
       preamble += "struct __resumable\n";
       preamble += "{\n";
+      preamble += "  typedef typename std::result_of<_F()>::type result_type;\n";
+      preamble += "\n";
       preamble += "  _F __f;\n";
       preamble += "  __push_coroutine __push;\n";
       preamble += "  __pull_coroutine* __pull = nullptr;\n";
       preamble += "  bool __ready = false;\n";
+      preamble += "  __resumable_result<result_type> __result;\n";
       preamble += "  std::exception_ptr __exception;\n";
       preamble += "\n";
       preamble += "  struct initializer\n";
@@ -1326,6 +1372,7 @@ public:
       preamble += "  initializer operator*() && { return { static_cast<_F&&>(__f) }; }\n";
       preamble += "\n";
       preamble += "  bool ready() const noexcept { return __ready; }\n";
+      preamble += "  result_type result() { return __result.__get(); }\n";
       preamble += "\n";
       preamble += "  void resume()\n";
       preamble += "  {\n";
@@ -1338,7 +1385,7 @@ public:
       preamble += "          (*this->__pull)();\n";
       preamble += "          try\n";
       preamble += "          {\n";
-      preamble += "            __f();\n";
+      preamble += "            __result.__run(__f);\n";
       preamble += "            this->__ready = true;\n";
       preamble += "          }\n";
       preamble += "          catch (...)\n";
