@@ -45,19 +45,22 @@ CLANG_LIBS = \
 bin/resumable-pp: src/resumable-pp.cpp
 	$(CXX) -std=c++11 -Wall -Wno-strict-aliasing -g $(LLVM_CXXFLAGS) -o $@ $< $(CLANG_LIBS) $(LLVM_LDFLAGS)
 
+TEST_FILES = $(wildcard test/*.cpp) $(wildcard test/*.hpp)
+TEST_FILES_PP = $(TEST_FILES:test/%pp=test/.pp/%pp)
+
 TESTS = $(wildcard test/*.cpp)
-TESTS_PP = $(TESTS:test/%.cpp=test/.pp.%.cpp)
 TEST_EXES = $(TESTS:test/%.cpp=test/.%.exe)
 TEST_OUTPUTS = $(TESTS:test/%.cpp=test/.%.out)
 TEST_RESULTS = $(TESTS:test/%.cpp=test/.%.res)
 
 .PHONY: test
-test: $(TEST_RESULTS)
+test: $(TEST_FILES_PP) $(TEST_RESULTS)
 
-$(TESTS_PP): test/.pp.%.cpp: test/%.cpp bin/resumable-pp
+$(TEST_FILES_PP): test/.pp/%pp: test/%pp bin/resumable-pp
+	mkdir -p test/.pp
 	bin/resumable-pp $< $(PP_CXXFLAGS) > $@
 
-$(TEST_EXES): test/.%.exe: test/.pp.%.cpp
+$(TEST_EXES): test/.%.exe: test/.pp/%.cpp
 	$(CXX) -std=c++1y -Wall -Wno-return-type -o $@ $<
 
 $(TEST_OUTPUTS): test/.%.out: test/.%.exe
