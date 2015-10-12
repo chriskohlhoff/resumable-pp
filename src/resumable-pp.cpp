@@ -30,6 +30,7 @@ using namespace clang::tooling;
 std::string allowed_path;
 bool verbose = false;
 bool line_numbers = false;
+bool stackful = false;
 
 //------------------------------------------------------------------------------
 // The following code is injected at the beginning of the preprocessor input.
@@ -607,10 +608,6 @@ public:
 
   void Generate()
   {
-    AnnotateAttr* attr = lambda_expr_->getCallOperator()->getAttr<AnnotateAttr>();
-    if (!attr || attr->getAnnotation() != "resumable")
-      return;
-
     locals_.Build();
     CompoundStmt* body = lambda_expr_->getBody();
     SourceRange beforeBody(lambda_expr_->getLocStart(), body->getLocStart());
@@ -1150,7 +1147,21 @@ public:
 
   bool VisitLambdaExpr(LambdaExpr* expr)
   {
-    resumable_lambda_codegen(rewriter_, resumable_detector_, expr).Generate();
+    AnnotateAttr* attr = expr->getCallOperator()->getAttr<AnnotateAttr>();
+    if (attr && attr->getAnnotation() == "resumable")
+    {
+      if (stackful)
+      {
+        rewriter_.InsertTextBefore(expr->getLocStart(), "__make_resumable(");
+        auto end = Lexer::getLocForEndOfToken(expr->getLocEnd(), 0, rewriter_.getSourceMgr(), rewriter_.getLangOpts());
+        rewriter_.InsertTextAfter(end, ")");
+      }
+      else
+      {
+        resumable_lambda_codegen(rewriter_, resumable_detector_, expr).Generate();
+      }
+    }
+
     return true;
   }
 
@@ -1227,7 +1238,7 @@ public:
     preamble += "# if (__clang_major__ >= 7)\n";
     preamble += "#  pragma GCC diagnostic ignored \"-Wdangling-else\"\n";
     preamble += "#  pragma GCC diagnostic ignored \"-Wreturn-type\"\n";
-    preamble += "#  define __RESUMABLE_UNUSED_TYPEDEF __attribute__((__unused__))\n";
+    preamble += "#  pragma GCC diagnostic ignored \"-Wunused-local-typedef\"\n";
     preamble += "# endif\n";
     preamble += "#elif defined(__GNUC__)\n";
     preamble += "# if ((__GNUC__ == 4) && (__GNUC_MINOR__ >= 8)) || (__GNUC__ > 4)\n";
@@ -1268,8 +1279,111 @@ public:
     preamble += "    else \\\n";
     preamble += "      return\n";
     preamble += "\n";
-    preamble += "#define co_yield for (;;) throw\n";
-    preamble += "#define break_resumable for (;;) throw\n";
+    if (stackful)
+    {
+      preamble += "#include <boost/coroutine/asymmetric_coroutine.hpp>\n";
+      preamble += "#include <boost/optional.hpp>\n";
+      preamble += "#include <cassert>\n";
+      preamble += "#include <exception>\n";
+      preamble += "\n";
+      preamble += "typedef ::boost::coroutines::push_coroutine<void> __push_coroutine;\n";
+      preamble += "typedef ::boost::coroutines::pull_coroutine<void> __pull_coroutine;\n";
+      preamble += "\n";
+      preamble += "inline __pull_coroutine*& __current_resumable()\n";
+      preamble += "{\n";
+      preamble += "  static __thread __pull_coroutine* r;\n";
+      preamble += "  return r;\n";
+      preamble += "}\n";
+      preamble += "\n";
+      preamble += "template <class _F>\n";
+      preamble += "struct __resumable\n";
+      preamble += "{\n";
+      preamble += "  _F __f;\n";
+      preamble += "  __push_coroutine __push;\n";
+      preamble += "  __pull_coroutine* __pull = nullptr;\n";
+      preamble += "  bool __ready = false;\n";
+      preamble += "  std::exception_ptr __exception;\n";
+      preamble += "\n";
+      preamble += "  struct initializer\n";
+      preamble += "  {\n";
+      preamble += "    typedef __resumable lambda __RESUMABLE_UNUSED_TYPEDEF;\n";
+      preamble += "    _F __f;\n";
+      preamble += "  };\n";
+      preamble += "\n";
+      preamble += "  __resumable(_F __f1)\n";
+      preamble += "    : __f(static_cast<_F&&>(__f1))\n";
+      preamble += "  {\n";
+      preamble += "  }\n";
+      preamble += "\n";
+      preamble += "  __resumable(initializer&& __init)\n";
+      preamble += "    : __f(static_cast<_F&&>(__init.__f))\n";
+      preamble += "  {\n";
+      preamble += "  }\n";
+      preamble += "\n";
+      preamble += "  __resumable(const __resumable&) = delete;\n";
+      preamble += "  __resumable& operator=(const __resumable&) = delete;\n";
+      preamble += "\n";
+      preamble += "  initializer operator*() && { return { static_cast<_F&&>(__f) }; }\n";
+      preamble += "\n";
+      preamble += "  bool ready() const noexcept { return __ready; }\n";
+      preamble += "\n";
+      preamble += "  void resume()\n";
+      preamble += "  {\n";
+      preamble += "    if (!__pull)\n";
+      preamble += "    {\n";
+      preamble += "      __push = __push_coroutine(\n";
+      preamble += "        [this](auto& __p)\n";
+      preamble += "        {\n";
+      preamble += "          this->__pull = &__p;\n";
+      preamble += "          (*this->__pull)();\n";
+      preamble += "          try\n";
+      preamble += "          {\n";
+      preamble += "            __f();\n";
+      preamble += "            this->__ready = true;\n";
+      preamble += "          }\n";
+      preamble += "          catch (...)\n";
+      preamble += "          {\n";
+      preamble += "            this->__exception = std::current_exception();\n";
+      preamble += "            this->__ready = true;\n";
+      preamble += "          }\n";
+      preamble += "        });\n";
+      preamble += "      __push();\n";
+      preamble += "    }\n";
+      preamble += "\n";
+      preamble += "    __pull_coroutine* __prev = __current_resumable();\n";
+      preamble += "    try\n";
+      preamble += "    {\n";
+      preamble += "      __current_resumable() = __pull;\n";
+      preamble += "      __push();\n";
+      preamble += "      __current_resumable() = __prev;\n";
+      preamble += "      if (__exception)\n";
+      preamble += "        std::rethrow_exception(__exception);\n";
+      preamble += "    }\n";
+      preamble += "    catch (...)\n";
+      preamble += "    {\n";
+      preamble += "      __current_resumable() = __prev;\n";
+      preamble += "      throw;\n";
+      preamble += "    }\n";
+      preamble += "  }\n";
+      preamble += "\n";
+      preamble += "  auto operator()() { return resume(); }\n";
+      preamble += "};\n";
+      preamble += "\n";
+      preamble += "template <class _F>\n";
+      preamble += "inline __resumable<typename std::decay<_F>::type> __make_resumable(_F&& __f)\n";
+      preamble += "{\n";
+      preamble += "  return {static_cast<_F&&>(__f)};\n";
+      preamble += "}\n";
+      preamble += "\n";
+      preamble += "#define resumable () mutable\n";
+      preamble += "#define co_yield (*__current_resumable())()\n";
+      preamble += "#define break_resumable (*__current_resumable())()\n";
+    }
+    else
+    {
+      preamble += "#define co_yield for (;;) throw\n";
+      preamble += "#define break_resumable for (;;) throw\n";
+    }
     preamble += "\n";
     preamble += "#endif // __RESUMABLE_PREAMBLE\n";
     preamble += "\n";
@@ -1289,7 +1403,7 @@ int main(int argc, const char* argv[])
 {
   if (argc < 2)
   {
-    std::cerr << "Usage: resumable-pp [-l] [-p <allowed_path> ] [-v] <source> [clang args]\n";
+    std::cerr << "Usage: resumable-pp [-l] [-p <allowed_path> ] [-v] [-s] <source> [clang args]\n";
     return 1;
   }
 
@@ -1306,6 +1420,8 @@ int main(int argc, const char* argv[])
     }
     else if (argv[arg] == std::string("-v"))
       verbose = true;
+    else if (argv[arg] == std::string("-s"))
+      stackful = true;
     ++arg;
   }
 
